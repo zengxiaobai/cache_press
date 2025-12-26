@@ -44,8 +44,33 @@ type Config struct {
 	delayRespHdrRandom  int
 	delayRespBody       int
 	delayRespBodyRandom int
-	chunkResp           float64
-	CloseConn           float64
+
+	ReqIDHdrName string
+	chunkResp    float64
+	CloseConn    float64
+
+	// 响应体缓存配置 - 仅服务器使用
+	cacheResp bool
+
+	// MD5校验配置 - 仅服务器使用
+	enableMD5 bool
+
+	// 测试MD5校验失败 - 仅客户端使用
+	testMD5Failure bool
+
+	// 持久连接控制 - 仅服务器使用
+	keepAliveProb          float64 // Connection头为keep-alive的概率 (0.0-1.0)
+	closeConnAfterBodyProb float64 // 发完body后主动关闭连接的概率 (0.0-1.0)
+
+	// 连接池配置 - 仅客户端使用
+	maxIdleConns        int
+	maxIdleConnsPerHost int
+	idleConnTimeout     time.Duration
+
+	// 客户端主动断开连接控制
+	clientSendCloseProb     float64 // 发送完请求后主动断开连接的概率 (0.0-1.0)
+	clientRecvHalfCloseProb float64 // 接收响应body一半时主动断开连接的概率 (0.0-1.0)
+	clientRecvFullCloseProb float64 // 接收完响应后主动断开连接的概率 (0.0-1.0)
 }
 
 type reqStatInfo struct {
@@ -62,9 +87,10 @@ var reqStatCh chan reqStatInfo
 func initTransport() {
 	// 创建自定义 Transport
 	transport = &http.Transport{
-		MaxIdleConns:        config.conns * 2, // 创建 Transport 时设置最大空闲连接数
-		MaxIdleConnsPerHost: config.conns,     // 创建 Transport 时设置每个主机最大空闲连接数
-		IdleConnTimeout:     90 * time.Second, // 创建 Transport 时设置空闲连接超时
+		MaxIdleConns:        config.maxIdleConns,        // 创建 Transport 时设置最大空闲连接数
+		MaxIdleConnsPerHost: config.maxIdleConnsPerHost, // 创建 Transport 时设置每个主机最大空闲连接数
+		IdleConnTimeout:     config.idleConnTimeout,     // 创建 Transport 时设置空闲连接超时
+		DisableCompression:  true,                       // 禁用自动添加Accept-Encoding头和自动解压缩
 	}
 	customDialer := &net.Dialer{
 		Timeout:   30 * time.Second,
@@ -122,7 +148,25 @@ func init() {
 	flag.IntVar(&config.delayRespBody, "delay-resp-body", 0, "延迟响应体时间(毫秒)")
 	flag.IntVar(&config.delayRespBodyRandom, "delay-resp-body-random", 0, "延迟响应体随机时间(毫秒)")
 	flag.Float64Var(&config.chunkResp, "chunk-resp", 0.0, "分块响应比例 (0.0-1.0)")
-	flag.Float64Var(&config.CloseConn, "close-conn", 0.0, "请求后关闭连接比例 (0.0-1.0)")
+	flag.Float64Var(&config.CloseConn, "client-close-conn-prob", 0.0, "请求后关闭连接比例 (0.0-1.0)")
+	flag.StringVar(&config.ReqIDHdrName, "req-id-hdr-name", "X-Request-ID", "请求ID头名称")
+	flag.BoolVar(&config.cacheResp, "cache-resp", true, "启用响应体缓存 (仅服务器模式)")
+	flag.BoolVar(&config.enableMD5, "enable-md5", false, "启用MD5校验 (仅服务器模式)")
+	flag.BoolVar(&config.testMD5Failure, "test-md5-failure", false, "测试MD5校验失败 (仅客户端模式)")
+
+	// 连接池配置 - 仅客户端使用
+	flag.IntVar(&config.maxIdleConns, "max-idle-conns", 2000, "最大空闲连接数")
+	flag.IntVar(&config.maxIdleConnsPerHost, "max-idle-conns-per-host", 1000, "每个主机最大空闲连接数")
+	flag.DurationVar(&config.idleConnTimeout, "idle-conn-timeout", 100*time.Second, "空闲连接超时时间")
+
+	// 持久连接控制 - 仅服务器使用
+	flag.Float64Var(&config.keepAliveProb, "server-keep-alive-prob", 1.0, "Connection头为keep-alive的概率 (0.0-1.0)")
+	flag.Float64Var(&config.closeConnAfterBodyProb, "server-close-conn-after-body-prob", 0.0, "发完body后主动关闭连接的概率 (0.0-1.0)")
+
+	// 客户端主动断开连接控制
+	flag.Float64Var(&config.clientSendCloseProb, "client-send-close-prob", 0.0, "发送完请求后主动断开连接的概率 (0.0-1.0)")
+	flag.Float64Var(&config.clientRecvHalfCloseProb, "client-recv-half-close-prob", 0.0, "接收响应body一半时主动断开连接的概率 (0.0-1.0)")
+	flag.Float64Var(&config.clientRecvFullCloseProb, "client-recv-full-close-prob", 0.0, "接收完响应后主动断开连接的概率 (0.0-1.0)")
 }
 
 func parseRespSize(respSizeStr string) []int {

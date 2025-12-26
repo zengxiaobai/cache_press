@@ -2,12 +2,24 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"math/rand"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
+
+	"github.com/andybalholm/brotli"
+)
+
+// 响应体缓存 - 键为响应大小，值为预生成的响应体
+var (
+	respCache      = make(map[int][]byte)
+	respCacheMutex sync.RWMutex
 )
 
 func serverGetRespSize(r *http.Request) int {
@@ -41,7 +53,7 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 获取Trace-ID
-	traceID := r.Header.Get("Trace-ID")
+	traceID := r.Header.Get(config.ReqIDHdrName)
 	if traceID == "" {
 		traceID = "unknown"
 	}
@@ -76,7 +88,18 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 
 					if err1 == nil && start <= end && start < int64(responseSize) {
 						// 有效 Range 请求
-						rangeBody := make([]byte, end-start+1)
+						rangeSize := int(end-start+1)
+						rangeBodyPtr := buffer.GetBytes(1024)
+						defer buffer.PutBytes(rangeBodyPtr)
+						rangeBody := *rangeBodyPtr
+
+						// 如果需要的长度超过池中切片的容量，创建一个新的
+						if rangeSize > cap(rangeBody) {
+							rangeBody = make([]byte, rangeSize)
+						} else {
+							rangeBody = rangeBody[:rangeSize]
+						}
+
 						for i := range rangeBody {
 							rangeBody[i] = 'x'
 						}
@@ -109,14 +132,37 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	*/
 	// 生成响应体
-	responseBody := bytes.Repeat([]byte("x"), responseSize)
+	var responseBody []byte
+	if config.cacheResp {
+		// 使用响应体缓存
+		respCacheMutex.RLock()
+		var ok bool
+		responseBody, ok = respCache[responseSize]
+		respCacheMutex.RUnlock()
 
-	// 记录头部发送时间
-	headerSendTime := time.Now()
+		if !ok {
+			// 缓存中不存在，生成并添加到缓存
+			newBody := bytes.Repeat([]byte("x"), responseSize)
+			respCacheMutex.Lock()
+			// 再次检查，避免竞态条件
+			if _, ok := respCache[responseSize]; !ok {
+				respCache[responseSize] = newBody
+			}
+			respCacheMutex.Unlock()
+			responseBody = newBody
+		}
+	} else {
+		// 不使用缓存，临时生成
+		responseBody = bytes.Repeat([]byte("x"), responseSize)
+	}
 
-	// 设置响应头
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.Itoa(responseSize))
+	// 根据客户端 Accept-Encoding 决定是否压缩（支持 gzip 和 br）
+	ae := r.Header.Get("Accept-Encoding")
+	var compressedBody []byte
+	encoding := ""
+
+	// 生成响应体（未压缩）
+	// responseBody 已生成上方
 
 	if config.delayRespBody > 0 {
 		delay := config.delayRespBody
@@ -126,8 +172,85 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(time.Duration(delay) * time.Millisecond)
 	}
 
-	// 发送响应
-	w.Write(responseBody)
+	// 设置基础响应头
+	w.Header().Set("Content-Type", "application/octet-stream")
+
+	// 如果启用MD5校验，计算响应内容的MD5并添加到响应头
+	if config.enableMD5 {
+		var dataToHash []byte
+		if encoding != "" {
+			// 如果使用压缩，计算压缩后数据的MD5
+			dataToHash = compressedBody
+		} else {
+			// 否则计算原始响应体的MD5
+			dataToHash = responseBody
+		}
+
+		hasher := md5.New()
+		hasher.Write(dataToHash)
+		md5Sum := hex.EncodeToString(hasher.Sum(nil))
+		w.Header().Set("X-Content-MD5", md5Sum)
+		fmt.Printf("MD5校验已启用，响应大小: %d, MD5: %s\n", len(dataToHash), md5Sum)
+	}
+
+	// 根据keepAliveProb设置Connection头
+	if config.keepAliveProb > 0 && rand.Float64() <= config.keepAliveProb {
+		w.Header().Set("Connection", "keep-alive")
+	} else {
+		w.Header().Set("Connection", "close")
+	}
+
+	// 选择压缩算法（优先顺序： br -> gzip ）
+	if ae != "" {
+		// 简单判断是否包含子串
+		if bytes.Contains([]byte(ae), []byte("br")) {
+			// brotli
+			var buf bytes.Buffer
+			bw := brotli.NewWriter(&buf)
+			_, _ = bw.Write(responseBody)
+			_ = bw.Close()
+			compressedBody = buf.Bytes()
+			encoding = "br"
+		} else if bytes.Contains([]byte(ae), []byte("gzip")) {
+			var buf bytes.Buffer
+			gw := gzip.NewWriter(&buf)
+			_, _ = gw.Write(responseBody)
+			_ = gw.Close()
+			compressedBody = buf.Bytes()
+			encoding = "gzip"
+		}
+	}
+
+	// 设置 Content-Length 和 Content-Encoding（如果压缩）
+	if encoding != "" {
+		// 告知客户端缓存变体：基于 Accept-Encoding
+		w.Header().Set("Vary", "Accept-Encoding")
+		w.Header().Set("Content-Encoding", encoding)
+		w.Header().Set("Content-Length", strconv.Itoa(len(compressedBody)))
+	} else {
+		w.Header().Set("Content-Length", strconv.Itoa(responseSize))
+	}
+
+	// 记录头部发送时间
+	headerSendTime := time.Now()
+
+	// 发送响应（压缩或未压缩）
+	if encoding != "" {
+		_, _ = w.Write(compressedBody)
+	} else {
+		_, _ = w.Write(responseBody)
+	}
+
+	// 根据closeConnAfterBodyProb决定是否主动关闭连接
+	if config.closeConnAfterBodyProb > 0 && rand.Float64() <= config.closeConnAfterBodyProb {
+		// 尝试获取底层连接并关闭
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, err := hj.Hijack()
+			if err == nil {
+				conn.Close()
+			}
+		}
+	}
 
 	// 记录body完成时间
 	bodyCompleteTime := time.Now()
