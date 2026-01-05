@@ -77,6 +77,7 @@ type reqStatInfo struct {
 	respTime      time.Duration
 	firstByteTime time.Duration
 	cacheHit      bool
+	traceID       string
 }
 
 var config Config
@@ -221,6 +222,13 @@ func getID() int64 {
 	return atomic.LoadInt64(&id)
 }
 
+func getNotHitID() int64 {
+	return atomic.LoadInt64(&notHitID)
+}
+
+func getTotalIDs() int64 {
+	return getID() + getNotHitID()
+}
 func incrNotHitID() int64 {
 	return atomic.AddInt64(&notHitID, 1)
 }

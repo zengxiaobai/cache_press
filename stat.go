@@ -16,6 +16,7 @@ func clientStat() {
 	var avgFirstByteTimeStat, avgResponseTimeStat time.Duration
 	var minFirstByteTimeStat, maxFirstByteTimeStat time.Duration
 	var minResponseTimeStat, maxResponseTimeStat time.Duration
+	var maxRespURL string
 	var round int64
 
 	startTime = time.Now()
@@ -52,13 +53,18 @@ func clientStat() {
 				if maxFirstByteTimeStat == 0 {
 					maxFirstByteTimeStat = time.Duration(reqStat.firstByteTime)
 				} else {
-					maxFirstByteTimeStat = time.Duration(math.Max(float64(maxFirstByteTimeStat), float64(reqStat.firstByteTime)))
+					if reqStat.firstByteTime > maxFirstByteTimeStat {
+						maxFirstByteTimeStat = time.Duration(reqStat.firstByteTime)
+					}
 				}
 
 				if maxResponseTimeStat == 0 {
 					maxResponseTimeStat = time.Duration(reqStat.respTime)
 				} else {
-					maxResponseTimeStat = time.Duration(math.Max(float64(maxResponseTimeStat), float64(reqStat.respTime)))
+					if reqStat.respTime > maxResponseTimeStat {
+						maxRespURL = reqStat.traceID
+						maxResponseTimeStat = time.Duration(reqStat.respTime)
+					}
 				}
 
 				if reqStat.cacheHit {
@@ -75,8 +81,8 @@ func clientStat() {
 				fmt.Printf("统计次%d: 总请求数=%d, 成功=%d, 失败=%d, 总字节数=%d, QPS=%.2f, 已用时=%.2fs, 缓存命中率=%.2f%%\n\n",
 					round, currentTotal, successRequests, failedRequests, totalBytes,
 					float64(currentTotal)/elapsed, elapsed, cacheHitRatio)
-				fmt.Printf("      》》》平均首包时间=%v, 平均响应时间=%v, 最大首包时间=%v, 最大响应时间=%v 最小首包时间=%v, 最小响应时间=%v\n\n\n\n",
-					avgFirstByteTimeStat, avgResponseTimeStat, maxFirstByteTimeStat, maxResponseTimeStat, minFirstByteTimeStat, minResponseTimeStat)
+				fmt.Printf("      》》》平均首包时间=%v, 平均响应时间=%v, 最大首包时间=%v, 最大响应时间=%v, 最大响应URL=%s 最小首包时间=%v, 最小响应时间=%v 总索引数=%d\n\n\n\n",
+					avgFirstByteTimeStat, avgResponseTimeStat, maxFirstByteTimeStat, maxResponseTimeStat, maxRespURL, minFirstByteTimeStat, minResponseTimeStat, getTotalIDs())
 
 				totalFirstByteTimeStat = 0
 				totalResponseTimeStat = 0
@@ -85,6 +91,7 @@ func clientStat() {
 				maxFirstByteTimeStat = 0
 				minResponseTimeStat = 0
 				maxResponseTimeStat = 0
+				maxRespURL = ""
 				cacheHits = 0
 				cacheHitRatio = 0
 			}

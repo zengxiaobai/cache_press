@@ -216,7 +216,7 @@ func runClient() {
 				// 分块读取响应体
 				const chunkSize = 35840
 				chunkPtr := buffer.GetBytes(35840)
-				defer buffer.PutBytes(chunkPtr)
+
 				chunk := *chunkPtr
 
 				for {
@@ -252,7 +252,7 @@ func runClient() {
 						break
 					}
 				}
-
+				buffer.PutBytes(chunkPtr)
 				// 如果服务器返回了MD5值，验证MD5是否匹配
 				if serverMD5 != "" {
 					calculatedMD5 := hex.EncodeToString(hasher.Sum(nil))
@@ -288,6 +288,7 @@ func runClient() {
 					firstByteTime: firstByteTime,
 					respTime:      responseTime,
 					cacheHit:      cacheHit,
+					traceID:       req.Header.Get(config.ReqIDHdrName) + req.URL.RequestURI(),
 				}:
 				default:
 					// Channel 满时丢弃数据，防止阻塞
@@ -298,6 +299,11 @@ func runClient() {
 					// 记录失败请求
 					fmt.Println("read body err :",
 						err, req.URL.Path, readBytes, time.Now().Format("2006-01-02 15:04:05.000"), req.Header.Get(config.ReqIDHdrName))
+					if resp != nil {
+						fmt.Println("respHeader:", resp.Header)
+					}
+					fmt.Println("reqHeader:", req.Header)
+
 					if !config.ignoreErr {
 						os.Exit(1)
 					}
