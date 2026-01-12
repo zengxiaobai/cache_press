@@ -38,12 +38,21 @@ type Config struct {
 	// CDN命中率配置 - 仅客户端使用
 	hitRatio            float64
 	urlCount            int
+	fixedURLStr         string   // 固定 URL 列表字符串 (仅客户端使用，URI格式，不含host)
+	fixedURLs           []string // 固定 URL 列表 (仅客户端使用，URI格式，不含host)
+	maxRequests         int      // 最大请求数量 (仅客户端使用，0表示不限制)
+	compareAddr         string   // Range 请求时用于对比 hash 的地址 (仅客户端使用)
 	ignoreErr           bool
 	deferStart          int
 	delayRespHdr        int
 	delayRespHdrRandom  int
 	delayRespBody       int
 	delayRespBodyRandom int
+
+	// Range 请求配置 - 仅客户端使用
+	enableRange bool   // 是否启用 Range 请求
+	rangeStr    string // Range 配置字符串，格式: "[0-2048,2049-5000]"
+	rangeRandom bool   // 是否在每个 range 上下限之间随机
 
 	ReqIDHdrName string
 	chunkResp    float64
@@ -52,11 +61,17 @@ type Config struct {
 	// 响应体缓存配置 - 仅服务器使用
 	cacheResp bool
 
-	// MD5校验配置 - 仅服务器使用
-	enableMD5 bool
+	// 哈希校验配置 - 仅服务器使用
+	enableHash bool
 
-	// 测试MD5校验失败 - 仅客户端使用
-	testMD5Failure bool
+	// Multi Range 传输方式配置 - 仅服务器使用
+	multiRangeChunked bool // multi range 是否使用 chunked 传输 (默认 false，使用 Content-Length)
+
+	// 预压缩配置 - 仅服务器使用
+	preCompress bool // 是否预压缩整个文件后再支持 Range (类似 Nginx 的 gzip_static)
+
+	// 测试哈希校验失败 - 仅客户端使用
+	testHashFailure bool
 
 	// 持久连接控制 - 仅服务器使用
 	keepAliveProb          float64 // Connection头为keep-alive的概率 (0.0-1.0)
@@ -127,7 +142,7 @@ func initTransport() {
 
 func init() {
 	flag.StringVar(&config.mode, "mode", "server", "运行模式: server/client")
-	flag.IntVar(&config.port, "port", 8080, "服务器端口")
+	flag.IntVar(&config.port, "port", 8000, "服务器端口")
 	flag.StringVar(&config.host, "host", "localhost", "服务器主机名或IP")
 	flag.StringVar(&config.addr, "addr", "", "服务器完整地址 (格式: host:port)，如果设置了此参数则忽略host和port)")
 	flag.IntVar(&config.conns, "conns", 10, "并发连接数")
@@ -142,6 +157,8 @@ func init() {
 	// CDN命中率配置 - 仅客户端使用
 	flag.Float64Var(&config.hitRatio, "hit-ratio", 0.5, "CDN命中率 (0.0-1.0)")
 	flag.IntVar(&config.urlCount, "url-count", 1000000, "总URL数量")
+	flag.StringVar(&config.fixedURLStr, "fixed-url", "", "固定 URL 列表 (仅客户端模式，URI格式，不含host，多个用逗号分隔)")
+	flag.IntVar(&config.maxRequests, "max-requests", 0, "最大请求数量 (仅客户端模式，0表示不限制)")
 	flag.BoolVar(&config.ignoreErr, "ignore-err", false, "忽略错误")
 	flag.IntVar(&config.deferStart, "defer-start", 0, "延迟启动时间(秒)")
 	flag.IntVar(&config.delayRespHdr, "delay-resp-hdr", 0, "延迟响应头时间(毫秒)")
@@ -150,10 +167,16 @@ func init() {
 	flag.IntVar(&config.delayRespBodyRandom, "delay-resp-body-random", 0, "延迟响应体随机时间(毫秒)")
 	flag.Float64Var(&config.chunkResp, "chunk-resp", 0.0, "分块响应比例 (0.0-1.0)")
 	flag.Float64Var(&config.CloseConn, "client-close-conn-prob", 0.0, "请求后关闭连接比例 (0.0-1.0)")
+
+	// Range 请求配置 - 仅客户端使用
+	flag.StringVar(&config.rangeStr, "range", "", "启用 Range 请求 (仅客户端模式)，格式: -range \"[0-2048,2049-5000]\"")
+	flag.BoolVar(&config.rangeRandom, "range-random", false, "在每个 range 上下限之间随机 (仅客户端模式)")
 	flag.StringVar(&config.ReqIDHdrName, "req-id-hdr-name", "X-Request-ID", "请求ID头名称")
 	flag.BoolVar(&config.cacheResp, "cache-resp", true, "启用响应体缓存 (仅服务器模式)")
-	flag.BoolVar(&config.enableMD5, "enable-md5", false, "启用MD5校验 (仅服务器模式)")
-	flag.BoolVar(&config.testMD5Failure, "test-md5-failure", false, "测试MD5校验失败 (仅客户端模式)")
+	flag.BoolVar(&config.enableHash, "enable-hash", false, "启用哈希校验 (仅服务器模式)")
+	flag.BoolVar(&config.multiRangeChunked, "multi-range-chunked", false, "multi range 使用 chunked 传输 (仅服务器模式，默认 false 使用 Content-Length)")
+	flag.BoolVar(&config.preCompress, "pre-compress", false, "预压缩整个文件后再支持 Range (仅服务器模式，类似 Nginx 的 gzip_static)")
+	flag.BoolVar(&config.testHashFailure, "test-hash-failure", false, "测试哈希校验失败 (仅客户端模式)")
 
 	// 连接池配置 - 仅客户端使用
 	flag.IntVar(&config.maxIdleConns, "max-idle-conns", 2000, "最大空闲连接数")
@@ -234,28 +257,36 @@ func incrNotHitID() int64 {
 }
 
 func generateRandomURL(baseURL string, urlCount int, hitRatio float64) string {
+	if len(config.fixedURLs) > 0 {
+		randIndex := rand.Intn(len(config.fixedURLs))
+		return config.fixedURLs[randIndex]
+	}
 
-	// 根据命中率决定是否使用已访问过的URL
 	id := getID()
 	if rand.Float64() <= hitRatio && id > 0 {
-		// 从已访问的URL中随机选择一个
 		randIndex := rand.Intn(int(id))
 		return genURL(baseURL, int64(randIndex))
 	}
 
 	if getID() < int64(urlCount) {
-		// 生成新的随机URL
 		newURL := fmt.Sprintf("%s/path%d.js", baseURL, incrID())
 		return newURL
-
 	} else {
 		return fmt.Sprintf("%s/path%d_nocache_%d.js", baseURL, rand.Intn(urlCount*2), incrNotHitID())
 	}
-
 }
 
 func main() {
 	flag.Parse()
+
+	config.enableRange = config.rangeStr != ""
+
+	if config.fixedURLStr != "" {
+		config.fixedURLs = strings.Split(config.fixedURLStr, ",")
+		for i, url := range config.fixedURLs {
+			config.fixedURLs[i] = strings.TrimSpace(url)
+		}
+	}
 
 	switch config.mode {
 	case "server":

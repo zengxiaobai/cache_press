@@ -22,7 +22,7 @@ import "context"
 // ContextKey type
 type Key int
 
-//  Context key types(built-in)
+// Context key types(built-in)
 const (
 	KeyBufferPoolCtx Key = iota
 	KeyVariables
