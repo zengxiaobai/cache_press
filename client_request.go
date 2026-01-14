@@ -117,9 +117,7 @@ func createRequest(connID int, baseURL string) (*http.Request, error) {
 				}
 				rangeParts = append(rangeParts, fmt.Sprintf("%d-%d", start, end))
 			}
-			rangeValue := fmt.Sprintf("bytes=%s", strings.Join(rangeParts, ","))
-			req.Header.Set("Range", rangeValue)
-			req.Header.Set("Orig-Range", rangeValue)
+			req.Header.Set("Range", fmt.Sprintf("bytes=%s", strings.Join(rangeParts, ",")))
 		}
 	}
 

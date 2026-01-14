@@ -77,6 +77,11 @@ type Config struct {
 	keepAliveProb          float64 // Connection头为keep-alive的概率 (0.0-1.0)
 	closeConnAfterBodyProb float64 // 发完body后主动关闭连接的概率 (0.0-1.0)
 
+	// 发送速率控制 - 仅服务器使用
+	sendBytesPerInterval int  // 每次发送的字节数
+	sendIntervalMs       int  // 每次发送后的 sleep 时间 (毫秒)
+	useChunkedTransfer   bool // 是否使用 chunked 传输 (默认 false，使用 Content-Length)
+
 	// 连接池配置 - 仅客户端使用
 	maxIdleConns        int
 	maxIdleConnsPerHost int
@@ -186,6 +191,11 @@ func init() {
 	// 持久连接控制 - 仅服务器使用
 	flag.Float64Var(&config.keepAliveProb, "server-keep-alive-prob", 1.0, "Connection头为keep-alive的概率 (0.0-1.0)")
 	flag.Float64Var(&config.closeConnAfterBodyProb, "server-close-conn-after-body-prob", 0.0, "发完body后主动关闭连接的概率 (0.0-1.0)")
+
+	// 发送速率控制 - 仅服务器使用
+	flag.IntVar(&config.sendBytesPerInterval, "send-bytes-per-interval", 0, "每次发送的字节数 (仅服务器模式，0表示不限制)")
+	flag.IntVar(&config.sendIntervalMs, "send-interval-ms", 0, "每次发送后的 sleep 时间 (毫秒，仅服务器模式)")
+	flag.BoolVar(&config.useChunkedTransfer, "use-chunked-transfer", false, "是否使用 chunked 传输 (仅服务器模式，默认 false 使用 Content-Length)")
 
 	// 客户端主动断开连接控制
 	flag.Float64Var(&config.clientSendCloseProb, "client-send-close-prob", 0.0, "发送完请求后主动断开连接的概率 (0.0-1.0)")

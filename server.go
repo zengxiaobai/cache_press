@@ -126,6 +126,11 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if method == "HEAD" {
+		handleHeadResponse(w, r, responseBody, encoding, traceID, method, host, url, startTime)
+		return
+	}
+
 	if config.preCompress && encoding != "" {
 		if r.Header.Get("Range") != "" {
 			handlePreCompressedRange(w, r, responseBody, encoding, traceID, method, host, url, startTime)

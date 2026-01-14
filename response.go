@@ -22,21 +22,8 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 
 	var md5Sum string
 	if config.enableHash {
-		origRangeHeader := r.Header.Get("Orig-Range")
-		var hashRanges []Range
-		if origRangeHeader != "" {
-			hashRanges, err = parseRangeHeader(origRangeHeader, int64(len(compressedBody)))
-			if err != nil {
-				fmt.Printf("Orig-Range 解析失败，使用 Range - Trace-ID: %s, Error: %v\n", traceID, err)
-				hashRanges = ranges
-			} else {
-				fmt.Printf("使用 Orig-Range 计算 hash - Trace-ID: %s, Range: %s, Orig-Range: %s\n", traceID, r.Header.Get("Range"), origRangeHeader)
-			}
-		} else {
-			hashRanges = ranges
-		}
-		md5Sum = calculateRangeMD5(compressedBody, hashRanges)
-		fmt.Printf("预压缩 Range 响应 MD5 - Trace-ID: %s, 范围数: %d, MD5: %s\n", traceID, len(hashRanges), md5Sum)
+		md5Sum = calculateRangeMD5(compressedBody, ranges)
+		fmt.Printf("预压缩 Range 响应 MD5 - Trace-ID: %s, 范围数: %d, MD5: %s\n", traceID, len(ranges), md5Sum)
 	}
 
 	w.Header().Set("Content-Encoding", encoding)
@@ -62,7 +49,10 @@ func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, respons
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Encoding", encoding)
 	w.Header().Set("Vary", "Accept-Encoding")
-	w.Header().Set("Content-Length", strconv.Itoa(len(compressedBody)))
+
+	if !config.useChunkedTransfer {
+		w.Header().Set("Content-Length", strconv.Itoa(len(compressedBody)))
+	}
 
 	if config.enableHash {
 		md5Sum := calculateMD5(compressedBody)
@@ -74,7 +64,7 @@ func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, respons
 	w.WriteHeader(http.StatusOK)
 	headerSendTime := time.Now()
 	serveBodyWithDelay()
-	_, _ = w.Write(compressedBody)
+	sendData(w, compressedBody)
 
 	closeConnectionIfNeeded(w)
 
@@ -100,22 +90,14 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 
 	var md5Sum string
 	if config.enableHash {
-		origRangeHeader := r.Header.Get("Orig-Range")
-		var hashRanges []Range
-		if origRangeHeader != "" {
-			hashRanges, err = parseRangeHeader(origRangeHeader, int64(len(responseBody)))
-			if err != nil {
-				fmt.Printf("Orig-Range 解析失败，使用 Range - Trace-ID: %s, Error: %v\n", traceID, err)
-				hashRanges = ranges
-			} else {
-				fmt.Printf("使用 Orig-Range 计算 hash - Trace-ID: %s, Range: %s, Orig-Range: %s\n", traceID, r.Header.Get("Range"), origRangeHeader)
-			}
-		} else {
-			hashRanges = ranges
-		}
-		md5Sum = calculateRangeMD5(responseBody, hashRanges)
-		fmt.Printf("Range 响应 MD5 - Trace-ID: %s, 范围数: %d, MD5: %s\n", traceID, len(hashRanges), md5Sum)
+		md5Sum = calculateRangeMD5(responseBody, ranges)
+		fmt.Printf("Range 响应 MD5 - Trace-ID: %s, 范围数: %d, MD5: %s\n", traceID, len(ranges), md5Sum)
 	}
+	bodyStartTime := time.Now()
+	fmt.Printf("Range 响应开始 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Start: %s, BodyComplete: %s\n",
+		traceID, host, url, method, ranges,
+		startTime.Format("2006-01-02 15:04:05.000"),
+		bodyStartTime.Format("2006-01-02 15:04:05.000"))
 
 	if len(ranges) == 1 {
 		handleSingleRange(w, ranges[0], responseBody, contentType, md5Sum)
@@ -141,31 +123,41 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 		w.Header().Set("Content-Encoding", encoding)
 	}
 
+	if config.enableHash {
+		md5Sum := calculateMD5(responseBody)
+		w.Header().Set("X-Content-MD5", md5Sum)
+		if encoding != "" {
+			fmt.Printf("边压缩边响应 MD5 - Trace-ID: %s, 原始大小: %d, MD5: %s\n", traceID, len(responseBody), md5Sum)
+		} else {
+			fmt.Printf("MD5校验已启用，响应大小: %d, MD5: %s\n", len(responseBody), md5Sum)
+		}
+	}
+
+	if !config.useChunkedTransfer {
+		if encoding != "" {
+			compressedBody := getPreCompressedBody(responseBody, encoding)
+			w.Header().Set("Content-Length", strconv.Itoa(len(compressedBody)))
+		} else {
+			w.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
+		}
+	}
+
 	w.WriteHeader(http.StatusOK)
 	headerSendTime := time.Now()
 	serveBodyWithDelay()
 
 	if encoding != "" {
-		if config.enableHash {
-			md5Sum := calculateMD5(responseBody)
-			w.Header().Set("X-Content-MD5", md5Sum)
-			fmt.Printf("边压缩边响应 MD5 - Trace-ID: %s, 原始大小: %d, MD5: %s\n", traceID, len(responseBody), md5Sum)
-		}
-		_ = streamCompressedBody(w, responseBody, encoding)
+		compressedBody := getPreCompressedBody(responseBody, encoding)
+		sendData(w, compressedBody)
 	} else {
-		if config.enableHash {
-			md5Sum := calculateMD5(responseBody)
-			w.Header().Set("X-Content-MD5", md5Sum)
-			fmt.Printf("MD5校验已启用，响应大小: %d, MD5: %s\n", len(responseBody), md5Sum)
-		}
-		_, _ = w.Write(responseBody)
+		sendData(w, responseBody)
 	}
 
 	closeConnectionIfNeeded(w)
 
 	bodyCompleteTime := time.Now()
-	fmt.Printf("响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Content-Length: %d, Start: %s, HeaderSent: %s, BodyComplete: %s, BodyLength: %d\n",
-		traceID, host, url, method, r.ContentLength,
+	fmt.Printf("响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Start: %s, HeaderSent: %s, BodyComplete: %s, BodyLength: %d\n",
+		traceID, host, url, method,
 		startTime.Format("2006-01-02 15:04:05.000"),
 		headerSendTime.Format("2006-01-02 15:04:05.000"),
 		bodyCompleteTime.Format("2006-01-02 15:04:05.000"),
@@ -189,4 +181,32 @@ func closeConnectionIfNeeded(w http.ResponseWriter) {
 			}
 		}
 	}
+}
+
+func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
+	contentType := "application/octet-stream"
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
+
+	if encoding != "" {
+		w.Header().Set("Vary", "Accept-Encoding")
+		w.Header().Set("Content-Encoding", encoding)
+	}
+
+	if config.enableHash {
+		md5Sum := calculateMD5(responseBody)
+		w.Header().Set("X-Content-MD5", md5Sum)
+		fmt.Printf("HEAD 响应 MD5 - Trace-ID: %s, 大小: %d, MD5: %s\n", traceID, len(responseBody), md5Sum)
+	}
+
+	setConnectionHeader(w)
+	w.WriteHeader(http.StatusOK)
+
+	bodyCompleteTime := time.Now()
+	fmt.Printf("HEAD 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Content-Length: %d, Start: %s, HeaderSent: %s, BodyComplete: %s\n",
+		traceID, host, url, method, len(responseBody),
+		startTime.Format("2006-01-02 15:04:05.000"),
+		bodyCompleteTime.Format("2006-01-02 15:04:05.000"),
+		bodyCompleteTime.Format("2006-01-02 15:04:05.000"))
 }

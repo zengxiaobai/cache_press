@@ -13,6 +13,67 @@ type Range struct {
 	End   int64
 }
 
+func writeWithRateLimit(w http.ResponseWriter, data []byte) {
+	if config.sendBytesPerInterval <= 0 || config.sendIntervalMs <= 0 {
+		_, _ = w.Write(data)
+		return
+	}
+
+	dataLen := len(data)
+	offset := 0
+
+	for offset < dataLen {
+		chunkSize := config.sendBytesPerInterval
+		if offset+chunkSize > dataLen {
+			chunkSize = dataLen - offset
+		}
+
+		_, _ = w.Write(data[offset : offset+chunkSize])
+		offset += chunkSize
+
+		if offset < dataLen {
+			time.Sleep(time.Duration(config.sendIntervalMs) * time.Millisecond)
+		}
+	}
+}
+
+func writeWithRateLimitChunked(w http.ResponseWriter, data []byte) {
+	if config.sendBytesPerInterval <= 0 || config.sendIntervalMs <= 0 {
+		_, _ = w.Write(data)
+		return
+	}
+
+	dataLen := len(data)
+	offset := 0
+
+	for offset < dataLen {
+		chunkSize := config.sendBytesPerInterval
+		if offset+chunkSize > dataLen {
+			chunkSize = dataLen - offset
+		}
+
+		chunk := data[offset : offset+chunkSize]
+		fmt.Fprintf(w, "%x\r\n", len(chunk))
+		_, _ = w.Write(chunk)
+		_, _ = w.Write([]byte("\r\n"))
+		offset += chunkSize
+
+		if offset < dataLen {
+			time.Sleep(time.Duration(config.sendIntervalMs) * time.Millisecond)
+		}
+	}
+
+	_, _ = w.Write([]byte("0\r\n\r\n"))
+}
+
+func sendData(w http.ResponseWriter, data []byte) {
+	if config.useChunkedTransfer {
+		writeWithRateLimitChunked(w, data)
+	} else {
+		writeWithRateLimit(w, data)
+	}
+}
+
 func parseRangeHeader(rangeHeader string, contentLength int64) ([]Range, error) {
 	if !strings.HasPrefix(rangeHeader, "bytes=") {
 		return nil, fmt.Errorf("unsupported range unit")
@@ -101,13 +162,17 @@ func handleSingleRange(w http.ResponseWriter, r Range, responseBody []byte, cont
 
 	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", r.Start, r.End, contentLength))
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Length", strconv.Itoa(int(r.End-r.Start+1)))
+
+	if !config.useChunkedTransfer {
+		w.Header().Set("Content-Length", strconv.Itoa(int(r.End-r.Start+1)))
+	}
+
 	if md5Sum != "" {
 		w.Header().Set("X-Content-MD5", md5Sum)
 	}
 	w.WriteHeader(http.StatusPartialContent)
 
-	_, _ = w.Write(responseBody[r.Start : r.End+1])
+	sendData(w, responseBody[r.Start:r.End+1])
 }
 
 func handleMultiRange(w http.ResponseWriter, ranges []Range, responseBody []byte, contentType string, md5Sum string) {
@@ -116,7 +181,7 @@ func handleMultiRange(w http.ResponseWriter, ranges []Range, responseBody []byte
 
 	w.Header().Set("Content-Type", fmt.Sprintf("multipart/byteranges; boundary=%s", boundary))
 
-	if !config.multiRangeChunked {
+	if !config.useChunkedTransfer && !config.multiRangeChunked {
 		totalLength := calculateMultiRangeLength(ranges, contentLength, contentType, boundary)
 		w.Header().Set("Content-Length", strconv.Itoa(totalLength))
 	}
@@ -131,7 +196,7 @@ func handleMultiRange(w http.ResponseWriter, ranges []Range, responseBody []byte
 		_, _ = fmt.Fprintf(w, "Content-Type: %s\r\n", contentType)
 		_, _ = fmt.Fprintf(w, "Content-Range: bytes %d-%d/%d\r\n", r.Start, r.End, contentLength)
 		_, _ = fmt.Fprintf(w, "\r\n")
-		_, _ = w.Write(responseBody[r.Start : r.End+1])
+		sendData(w, responseBody[r.Start:r.End+1])
 		_, _ = fmt.Fprintf(w, "\r\n")
 	}
 
