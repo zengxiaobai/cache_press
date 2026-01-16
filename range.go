@@ -37,41 +37,8 @@ func writeWithRateLimit(w http.ResponseWriter, data []byte) {
 	}
 }
 
-func writeWithRateLimitChunked(w http.ResponseWriter, data []byte) {
-	if config.sendBytesPerInterval <= 0 || config.sendIntervalMs <= 0 {
-		_, _ = w.Write(data)
-		return
-	}
-
-	dataLen := len(data)
-	offset := 0
-
-	for offset < dataLen {
-		chunkSize := config.sendBytesPerInterval
-		if offset+chunkSize > dataLen {
-			chunkSize = dataLen - offset
-		}
-
-		chunk := data[offset : offset+chunkSize]
-		fmt.Fprintf(w, "%x\r\n", len(chunk))
-		_, _ = w.Write(chunk)
-		_, _ = w.Write([]byte("\r\n"))
-		offset += chunkSize
-
-		if offset < dataLen {
-			time.Sleep(time.Duration(config.sendIntervalMs) * time.Millisecond)
-		}
-	}
-
-	_, _ = w.Write([]byte("0\r\n\r\n"))
-}
-
 func sendData(w http.ResponseWriter, data []byte) {
-	if config.useChunkedTransfer {
-		writeWithRateLimitChunked(w, data)
-	} else {
-		writeWithRateLimit(w, data)
-	}
+	writeWithRateLimit(w, data)
 }
 
 func parseRangeHeader(rangeHeader string, contentLength int64) ([]Range, error) {
