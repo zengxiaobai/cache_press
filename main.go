@@ -61,6 +61,9 @@ type Config struct {
 	// 响应体缓存配置 - 仅服务器使用
 	cacheResp bool
 
+	// 响应体内容配置 - 仅服务器使用
+	useRandomContent bool // 是否使用随机内容生成响应体 (默认 false，使用重复模式)
+
 	// 哈希校验配置 - 仅服务器使用
 	enableHash bool
 
@@ -182,6 +185,7 @@ func init() {
 	flag.BoolVar(&config.rangeRandom, "range-random", false, "在每个 range 上下限之间随机 (仅客户端模式)")
 	flag.StringVar(&config.ReqIDHdrName, "req-id-hdr-name", "X-Request-ID", "请求ID头名称")
 	flag.BoolVar(&config.cacheResp, "cache-resp", true, "启用响应体缓存 (仅服务器模式)")
+	flag.BoolVar(&config.useRandomContent, "random-content", false, "使用随机内容生成响应体 (仅服务器模式，默认 false 使用重复模式)")
 	flag.BoolVar(&config.enableHash, "enable-hash", false, "启用哈希校验 (仅服务器模式)")
 	flag.BoolVar(&config.multiRangeChunked, "multi-range-chunked", false, "multi range 使用 chunked 传输 (仅服务器模式，默认 false 使用 Content-Length)")
 	flag.BoolVar(&config.preCompress, "pre-compress", false, "预压缩整个文件后再支持 Range (仅服务器模式，类似 Nginx 的 gzip_static)")

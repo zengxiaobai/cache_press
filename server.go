@@ -61,7 +61,25 @@ func getTraceID(r *http.Request) string {
 	return "unknown"
 }
 
+func createRandomRespBody(size int) []byte {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+-=[]{}|;:,.<>?"
+	charsetLen := len(charset)
+
+	buf := buffer.GetIoBuffer(size)
+	defer buffer.PutIoBuffer(buf)
+
+	for i := 0; i < size; i++ {
+		buf.WriteByte(charset[rand.Intn(charsetLen)])
+	}
+
+	return buf.Bytes()
+}
+
 func createRespBodyCont(size int) []byte {
+	if config.useRandomContent {
+		return createRandomRespBody(size)
+	}
+
 	const pattern = "1234567890abcdefghij"
 	patternLen := len(pattern)
 
