@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -27,7 +28,12 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 	}
 
 	w.Header().Set("Content-Encoding", encoding)
-	w.Header().Set("Vary", "Accept-Encoding")
+	// 设置 Vary 头
+	if len(config.varyHeaders) > 0 {
+		w.Header().Set("Vary", strings.Join(config.varyHeaders, ", "))
+	} else if encoding != "" {
+		w.Header().Set("Vary", "Accept-Encoding")
+	}
 
 	if len(ranges) == 1 {
 		handleSingleRange(w, ranges[0], compressedBody, contentType, md5Sum)
@@ -48,7 +54,12 @@ func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, respons
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Encoding", encoding)
-	w.Header().Set("Vary", "Accept-Encoding")
+	// 设置 Vary 头
+	if len(config.varyHeaders) > 0 {
+		w.Header().Set("Vary", strings.Join(config.varyHeaders, ", "))
+	} else if encoding != "" {
+		w.Header().Set("Vary", "Accept-Encoding")
+	}
 
 	if !config.useChunkedTransfer {
 		w.Header().Set("Content-Length", strconv.Itoa(len(compressedBody)))
@@ -93,6 +104,11 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 		md5Sum = calculateRangeMD5(responseBody, ranges)
 		fmt.Printf("Range 响应 MD5 - Trace-ID: %s, 范围数: %d, MD5: %s\n", traceID, len(ranges), md5Sum)
 	}
+
+	// 设置 Vary 头
+	if len(config.varyHeaders) > 0 {
+		w.Header().Set("Vary", strings.Join(config.varyHeaders, ", "))
+	}
 	bodyStartTime := time.Now()
 	fmt.Printf("Range 响应开始 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Start: %s, BodyComplete: %s\n",
 		traceID, host, url, method, ranges,
@@ -118,8 +134,14 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 	w.Header().Set("Content-Type", contentType)
 	setConnectionHeader(w)
 
-	if encoding != "" {
+	// 设置 Vary 头
+	if len(config.varyHeaders) > 0 {
+		w.Header().Set("Vary", strings.Join(config.varyHeaders, ", "))
+	} else if encoding != "" {
 		w.Header().Set("Vary", "Accept-Encoding")
+	}
+
+	if encoding != "" {
 		w.Header().Set("Content-Encoding", encoding)
 	}
 
@@ -189,8 +211,14 @@ func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []b
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
 
-	if encoding != "" {
+	// 设置 Vary 头
+	if len(config.varyHeaders) > 0 {
+		w.Header().Set("Vary", strings.Join(config.varyHeaders, ", "))
+	} else if encoding != "" {
 		w.Header().Set("Vary", "Accept-Encoding")
+	}
+
+	if encoding != "" {
 		w.Header().Set("Content-Encoding", encoding)
 	}
 

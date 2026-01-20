@@ -124,5 +124,12 @@ func createRequest(connID int, baseURL string) (*http.Request, error) {
 	req.URL.Host = config.addr
 	req.Host = config.host
 
+	// 添加自定义请求头
+	for i := 0; i < len(config.customHeaders); i += 2 {
+		if i+1 < len(config.customHeaders) {
+			req.Header.Set(config.customHeaders[i], config.customHeaders[i+1])
+		}
+	}
+
 	return req, nil
 }

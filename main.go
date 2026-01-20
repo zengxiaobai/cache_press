@@ -9,10 +9,10 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"os"
 	"sync/atomic"
 	"syscall"
 
-	//	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -78,9 +78,11 @@ type Config struct {
 	closeConnAfterBodyProb float64 // 发完body后主动关闭连接的概率 (0.0-1.0)
 
 	// 发送速率控制 - 仅服务器使用
-	sendBytesPerInterval int  // 每次发送的字节数
-	sendIntervalMs       int  // 每次发送后的 sleep 时间 (毫秒)
-	useChunkedTransfer   bool // 是否使用 chunked 传输 (默认 false，使用 Content-Length)
+	sendBytesPerInterval int      // 每次发送的字节数
+	sendIntervalMs       int      // 每次发送后的 sleep 时间 (毫秒)
+	useChunkedTransfer   bool     // 是否使用 chunked 传输 (默认 false，使用 Content-Length)
+	vary                 string   // Vary 头配置字符串，格式: "[\"Accept-Encoding\",\"User-Agent\"]"
+	varyHeaders          []string // 解析后的 Vary 头列表
 
 	// 连接池配置 - 仅客户端使用
 	maxIdleConns        int
@@ -88,9 +90,11 @@ type Config struct {
 	idleConnTimeout     time.Duration
 
 	// 客户端主动断开连接控制
-	clientSendCloseProb     float64 // 发送完请求后主动断开连接的概率 (0.0-1.0)
-	clientRecvHalfCloseProb float64 // 接收响应body一半时主动断开连接的概率 (0.0-1.0)
-	clientRecvFullCloseProb float64 // 接收完响应后主动断开连接的概率 (0.0-1.0)
+	clientSendCloseProb     float64  // 发送完请求后主动断开连接的概率 (0.0-1.0)
+	clientRecvHalfCloseProb float64  // 接收响应body一半时主动断开连接的概率 (0.0-1.0)
+	clientRecvFullCloseProb float64  // 接收完响应后主动断开连接的概率 (0.0-1.0)
+	addHeaderFile           string   // 请求头配置文件路径 (仅客户端使用)
+	customHeaders           []string // 解析后的自定义请求头列表
 }
 
 type reqStatInfo struct {
@@ -196,11 +200,13 @@ func init() {
 	flag.IntVar(&config.sendBytesPerInterval, "send-bytes-per-interval", 0, "每次发送的字节数 (仅服务器模式，0表示不限制)")
 	flag.IntVar(&config.sendIntervalMs, "send-interval-ms", 0, "每次发送后的 sleep 时间 (毫秒，仅服务器模式)")
 	flag.BoolVar(&config.useChunkedTransfer, "use-chunked-transfer", false, "是否使用 chunked 传输 (仅服务器模式，默认 false 使用 Content-Length)")
+	flag.StringVar(&config.vary, "vary", "", "Vary 响应头配置 (仅服务器模式，格式: [\"header1\",\"header2\"])")
 
 	// 客户端主动断开连接控制
 	flag.Float64Var(&config.clientSendCloseProb, "client-send-close-prob", 0.0, "发送完请求后主动断开连接的概率 (0.0-1.0)")
 	flag.Float64Var(&config.clientRecvHalfCloseProb, "client-recv-half-close-prob", 0.0, "接收响应body一半时主动断开连接的概率 (0.0-1.0)")
 	flag.Float64Var(&config.clientRecvFullCloseProb, "client-recv-full-close-prob", 0.0, "接收完响应后主动断开连接的概率 (0.0-1.0)")
+	flag.StringVar(&config.addHeaderFile, "add-header", "", "自定义请求头文件路径 (仅客户端模式，格式: 每行 header: value)")
 }
 
 func parseRespSize(respSizeStr string) []int {
@@ -266,6 +272,69 @@ func incrNotHitID() int64 {
 	return atomic.AddInt64(&notHitID, 1)
 }
 
+// parseVary 解析 Vary 头配置字符串
+// 格式: ["Accept-Encoding","User-Agent"]
+func parseVary(varyStr string) []string {
+	if varyStr == "" {
+		return nil
+	}
+
+	// 去除前后的方括号
+	varyStr = strings.Trim(varyStr, "[]")
+	if varyStr == "" {
+		return nil
+	}
+
+	// 按逗号分割
+	parts := strings.Split(varyStr, ",")
+	var headers []string
+	for _, part := range parts {
+		// 去除前后的引号和空格
+		part = strings.TrimSpace(part)
+		part = strings.Trim(part, `"`)
+		if part != "" {
+			headers = append(headers, part)
+		}
+	}
+	return headers
+}
+
+// parseHeaderFile 解析请求头文件
+// 文件格式: 每行 header: value
+func parseHeaderFile(filePath string) ([]string, error) {
+	if filePath == "" {
+		return nil, nil
+	}
+
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("读取请求头文件失败: %w", err)
+	}
+
+	lines := strings.Split(string(content), "\n")
+	var headers []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// 查找冒号分隔符
+		colonIndex := strings.Index(line, ":")
+		if colonIndex == -1 {
+			continue
+		}
+
+		headerName := strings.TrimSpace(line[:colonIndex])
+		headerValue := strings.TrimSpace(line[colonIndex+1:])
+		if headerName != "" {
+			headers = append(headers, headerName, headerValue)
+		}
+	}
+
+	return headers, nil
+}
+
 func generateRandomURL(baseURL string, urlCount int, hitRatio float64) string {
 	if len(config.fixedURLs) > 0 {
 		randIndex := rand.Intn(len(config.fixedURLs))
@@ -298,10 +367,20 @@ func main() {
 		}
 	}
 
+	// 解析服务端 Vary 头配置
+	config.varyHeaders = parseVary(config.vary)
+
 	switch config.mode {
 	case "server":
 		startServer()
 	case "client":
+		// 解析客户端请求头文件
+		var err error
+		config.customHeaders, err = parseHeaderFile(config.addHeaderFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+
 		initTransport()
 		reqStatCh = make(chan reqStatInfo, 50000)
 		config.respSizeRange = parseRespSize(config.respSizeStr)
