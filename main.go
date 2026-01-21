@@ -83,6 +83,7 @@ type Config struct {
 	// 发送速率控制 - 仅服务器使用
 	sendBytesPerInterval int      // 每次发送的字节数
 	sendIntervalMs       int      // 每次发送后的 sleep 时间 (毫秒)
+	respRate             string   // 响应速率限制，格式: "10MB/s" 或 "100KB/s"
 	useChunkedTransfer   bool     // 是否使用 chunked 传输 (默认 false，使用 Content-Length)
 	vary                 string   // Vary 头配置字符串，格式: "[\"Accept-Encoding\",\"User-Agent\"]"
 	varyHeaders          []string // 解析后的 Vary 头列表
@@ -203,6 +204,7 @@ func init() {
 	// 发送速率控制 - 仅服务器使用
 	flag.IntVar(&config.sendBytesPerInterval, "send-bytes-per-interval", 0, "每次发送的字节数 (仅服务器模式，0表示不限制)")
 	flag.IntVar(&config.sendIntervalMs, "send-interval-ms", 0, "每次发送后的 sleep 时间 (毫秒，仅服务器模式)")
+	flag.StringVar(&config.respRate, "resp-rate", "", "响应速率限制 (仅服务器模式，格式: \"10MB/s\" 或 \"100KB/s\")")
 	flag.BoolVar(&config.useChunkedTransfer, "use-chunked-transfer", false, "是否使用 chunked 传输 (仅服务器模式，默认 false 使用 Content-Length)")
 	flag.StringVar(&config.vary, "vary", "", "Vary 响应头配置 (仅服务器模式，格式: [\"header1\",\"header2\"])")
 
@@ -339,6 +341,90 @@ func parseHeaderFile(filePath string) ([]string, error) {
 	return headers, nil
 }
 
+// parseRespRate 解析响应速率字符串
+// 格式: "10MB/s" 或 "100KB/s"
+// 返回: (sendBytesPerInterval, sendIntervalMs, error)
+func parseRespRate(rateStr string) (int, int, error) {
+	if rateStr == "" {
+		return 0, 0, nil
+	}
+
+	// 去除空格
+	rateStr = strings.TrimSpace(rateStr)
+
+	// 查找单位分隔符
+	unitIndex := strings.IndexFunc(rateStr, func(r rune) bool {
+		return !('0' <= r && r <= '9' || r == '.')
+	})
+
+	if unitIndex == -1 {
+		return 0, 0, fmt.Errorf("无效的速率格式: %s", rateStr)
+	}
+
+	// 解析数值部分
+	rateStr = strings.TrimSpace(rateStr)
+	numStr := rateStr[:unitIndex]
+	unitStr := rateStr[unitIndex:]
+
+	// 解析数值
+	num, err := strconv.ParseFloat(numStr, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("无效的速率数值: %s", numStr)
+	}
+
+	// 解析单位
+	unitStr = strings.TrimSpace(unitStr)
+	unitStr = strings.ToUpper(unitStr)
+
+	// 提取字节单位和时间单位
+	var byteUnit string
+	var timeUnit string
+
+	if strings.Contains(unitStr, "/") {
+		parts := strings.Split(unitStr, "/")
+		byteUnit = strings.TrimSpace(parts[0])
+		timeUnit = strings.TrimSpace(parts[1])
+	} else {
+		byteUnit = unitStr
+		timeUnit = "S"
+	}
+
+	// 转换为字节
+	var bytesPerSec float64
+	switch byteUnit {
+	case "B":
+		bytesPerSec = num
+	case "KB":
+		bytesPerSec = num * 1024
+	case "MB":
+		bytesPerSec = num * 1024 * 1024
+	case "GB":
+		bytesPerSec = num * 1024 * 1024 * 1024
+	default:
+		return 0, 0, fmt.Errorf("无效的字节单位: %s", byteUnit)
+	}
+
+	// 验证时间单位
+	switch timeUnit {
+	case "S", "MS":
+		// 有效时间单位
+	default:
+		return 0, 0, fmt.Errorf("无效的时间单位: %s", timeUnit)
+	}
+
+	// 计算每次发送的字节数
+	// 我们使用 100ms 的间隔来实现更平滑的速率控制
+	sendIntervalMs := 100
+	sendBytesPerInterval := int(bytesPerSec * float64(sendIntervalMs) / 1000.0)
+
+	// 确保至少发送1字节
+	if sendBytesPerInterval < 1 {
+		sendBytesPerInterval = 1
+	}
+
+	return sendBytesPerInterval, sendIntervalMs, nil
+}
+
 func generateRandomURL(baseURL string, urlCount int, hitRatio float64) string {
 	if len(config.fixedURLs) > 0 {
 		randIndex := rand.Intn(len(config.fixedURLs))
@@ -373,6 +459,17 @@ func main() {
 
 	// 解析服务端 Vary 头配置
 	config.varyHeaders = parseVary(config.vary)
+
+	// 解析响应速率限制
+	if config.respRate != "" {
+		sendBytes, sendInterval, err := parseRespRate(config.respRate)
+		if err != nil {
+			log.Fatalf("无效的响应速率配置: %v", err)
+		}
+		config.sendBytesPerInterval = sendBytes
+		config.sendIntervalMs = sendInterval
+		fmt.Printf("响应速率限制已设置: %s (每次发送 %d 字节，间隔 %d 毫秒)\n", config.respRate, sendBytes, sendInterval)
+	}
 
 	switch config.mode {
 	case "server":
