@@ -9,6 +9,17 @@ import (
 	"time"
 )
 
+// addResponseHeaders 添加响应头文件中的内容
+func addResponseHeaders(w http.ResponseWriter) {
+	for i := 0; i < len(config.respHeaders); i += 2 {
+		if i+1 < len(config.respHeaders) {
+			headerName := config.respHeaders[i]
+			headerValue := config.respHeaders[i+1]
+			w.Header().Set(headerName, headerValue)
+		}
+	}
+}
+
 func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
 	compressedBody := getPreCompressedBody(responseBody, encoding)
 	contentType := "application/octet-stream"
@@ -26,6 +37,9 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 		md5Sum = calculateRangeMD5(compressedBody, ranges)
 		fmt.Printf("预压缩 Range 响应 MD5 - Trace-ID: %s, 范围数: %d, MD5: %s\n", traceID, len(ranges), md5Sum)
 	}
+
+	// 添加响应头文件中的内容
+	addResponseHeaders(w)
 
 	w.Header().Set("Content-Encoding", encoding)
 	// 设置 Vary 头
@@ -51,6 +65,9 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
 	compressedBody := getPreCompressedBody(responseBody, encoding)
 	contentType := "application/octet-stream"
+
+	// 添加响应头文件中的内容
+	addResponseHeaders(w)
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Encoding", encoding)
@@ -105,6 +122,9 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 		fmt.Printf("Range 响应 MD5 - Trace-ID: %s, 范围数: %d, MD5: %s\n", traceID, len(ranges), md5Sum)
 	}
 
+	// 添加响应头文件中的内容
+	addResponseHeaders(w)
+
 	// 设置 Vary 头
 	if len(config.varyHeaders) > 0 {
 		w.Header().Set("Vary", strings.Join(config.varyHeaders, ", "))
@@ -130,6 +150,9 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 
 func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
 	contentType := "application/octet-stream"
+
+	// 添加响应头文件中的内容
+	addResponseHeaders(w)
 
 	w.Header().Set("Content-Type", contentType)
 	setConnectionHeader(w)
@@ -207,6 +230,9 @@ func closeConnectionIfNeeded(w http.ResponseWriter) {
 
 func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
 	contentType := "application/octet-stream"
+
+	// 添加响应头文件中的内容
+	addResponseHeaders(w)
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))

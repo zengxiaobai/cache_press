@@ -84,6 +84,8 @@ type Config struct {
 	sendBytesPerInterval int      // 每次发送的字节数
 	sendIntervalMs       int      // 每次发送后的 sleep 时间 (毫秒)
 	respRate             string   // 响应速率限制，格式: "10MB/s" 或 "100KB/s"
+	respHeaderFile       string   // 响应头文件路径 (仅服务器模式)
+	respHeaders          []string // 解析后的响应头列表 (仅服务器模式)
 	useChunkedTransfer   bool     // 是否使用 chunked 传输 (默认 false，使用 Content-Length)
 	vary                 string   // Vary 头配置字符串，格式: "[\"Accept-Encoding\",\"User-Agent\"]"
 	varyHeaders          []string // 解析后的 Vary 头列表
@@ -205,6 +207,7 @@ func init() {
 	flag.IntVar(&config.sendBytesPerInterval, "send-bytes-per-interval", 0, "每次发送的字节数 (仅服务器模式，0表示不限制)")
 	flag.IntVar(&config.sendIntervalMs, "send-interval-ms", 0, "每次发送后的 sleep 时间 (毫秒，仅服务器模式)")
 	flag.StringVar(&config.respRate, "resp-rate", "", "响应速率限制 (仅服务器模式，格式: \"10MB/s\" 或 \"100KB/s\")")
+	flag.StringVar(&config.respHeaderFile, "resp-header-file", "", "响应头文件路径 (仅服务器模式，格式: 每行一个头和值，头跟值中间用空格分开)")
 	flag.BoolVar(&config.useChunkedTransfer, "use-chunked-transfer", false, "是否使用 chunked 传输 (仅服务器模式，默认 false 使用 Content-Length)")
 	flag.StringVar(&config.vary, "vary", "", "Vary 响应头配置 (仅服务器模式，格式: [\"header1\",\"header2\"])")
 
@@ -425,6 +428,42 @@ func parseRespRate(rateStr string) (int, int, error) {
 	return sendBytesPerInterval, sendIntervalMs, nil
 }
 
+// parseRespHeaderFile 解析响应头文件
+// 文件格式: 每行一个头和值，头跟值中间用空格分开
+func parseRespHeaderFile(filePath string) ([]string, error) {
+	if filePath == "" {
+		return nil, nil
+	}
+
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("读取响应头文件失败: %w", err)
+	}
+
+	lines := strings.Split(string(content), "\n")
+	var headers []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// 查找第一个空格分隔符
+		spaceIndex := strings.Index(line, " ")
+		if spaceIndex == -1 {
+			continue
+		}
+
+		headerName := strings.TrimSpace(line[:spaceIndex])
+		headerValue := strings.TrimSpace(line[spaceIndex:])
+		if headerName != "" {
+			headers = append(headers, headerName, headerValue)
+		}
+	}
+
+	return headers, nil
+}
+
 func generateRandomURL(baseURL string, urlCount int, hitRatio float64) string {
 	if len(config.fixedURLs) > 0 {
 		randIndex := rand.Intn(len(config.fixedURLs))
@@ -459,6 +498,13 @@ func main() {
 
 	// 解析服务端 Vary 头配置
 	config.varyHeaders = parseVary(config.vary)
+
+	// 解析响应头文件
+	respHeaders, err := parseRespHeaderFile(config.respHeaderFile)
+	if err != nil {
+		fmt.Printf("警告: 解析响应头文件失败: %v\n", err)
+	}
+	config.respHeaders = respHeaders
 
 	// 解析响应速率限制
 	if config.respRate != "" {
