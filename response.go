@@ -20,15 +20,44 @@ func addResponseHeaders(w http.ResponseWriter) {
 	}
 }
 
+// logRequestHeaders 打印请求头
+func logRequestHeaders(r *http.Request, traceID string) {
+	if config.logRequestHeaders {
+		fmt.Printf("请求头 - Trace-ID: %s\n", traceID)
+		for name, values := range r.Header {
+			for _, value := range values {
+				fmt.Printf("  %s: %s\n", name, value)
+			}
+		}
+	}
+}
+
+// logResponseHeaders 打印响应头
+func logResponseHeaders(w http.ResponseWriter, traceID string) {
+	if config.logResponseHeaders {
+		fmt.Printf("响应头 - Trace-ID: %s\n", traceID)
+		for name, values := range w.Header() {
+			for _, value := range values {
+				fmt.Printf("  %s: %s\n", name, value)
+			}
+		}
+	}
+}
+
 func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
 	compressedBody := getPreCompressedBody(responseBody, encoding)
 	contentType := "application/octet-stream"
+
+	// 打印请求头
+	logRequestHeaders(r, traceID)
 
 	ranges, err := parseRangeHeader(r.Header.Get("Range"), int64(len(compressedBody)))
 	if err != nil {
 		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", len(compressedBody)))
 		fmt.Printf("Range 请求无效 - Trace-ID: %s, Error: %v %s\n", traceID, err, r.Header.Get("Range"))
+		// 打印响应头
+		logResponseHeaders(w, traceID)
 		return
 	}
 
@@ -55,9 +84,12 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 		handleMultiRange(w, ranges, compressedBody, contentType, md5Sum)
 	}
 
+	// 打印响应头
+	logResponseHeaders(w, traceID)
+
 	bodyCompleteTime := time.Now()
 	fmt.Printf("预压缩 Range 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Encoding: %s, Start: %s, BodyComplete: %s\n",
-		traceID, host, url, method, ranges, encoding,
+		traceID, host, url, method, ranges,
 		startTime.Format("2006-01-02 15:04:05.000"),
 		bodyCompleteTime.Format("2006-01-02 15:04:05.000"))
 }
@@ -65,6 +97,9 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
 	compressedBody := getPreCompressedBody(responseBody, encoding)
 	contentType := "application/octet-stream"
+
+	// 打印请求头
+	logRequestHeaders(r, traceID)
 
 	// 添加响应头文件中的内容
 	addResponseHeaders(w)
@@ -96,6 +131,9 @@ func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, respons
 
 	closeConnectionIfNeeded(w)
 
+	// 打印响应头
+	logResponseHeaders(w, traceID)
+
 	bodyCompleteTime := time.Now()
 	fmt.Printf("预压缩响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Encoding: %s, Start: %s, HeaderSent: %s, BodyComplete: %s, BodyLength: %d\n",
 		traceID, host, url, method, encoding,
@@ -108,11 +146,16 @@ func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, respons
 func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []byte, traceID, method, host, url string, startTime time.Time) {
 	contentType := "application/octet-stream"
 
+	// 打印请求头
+	logRequestHeaders(r, traceID)
+
 	ranges, err := parseRangeHeader(r.Header.Get("Range"), int64(len(responseBody)))
 	if err != nil {
 		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", len(responseBody)))
 		fmt.Printf("Range 请求无效 - Trace-ID: %s, Error: %v %s\n", traceID, err, r.Header.Get("Range"))
+		// 打印响应头
+		logResponseHeaders(w, traceID)
 		return
 	}
 
@@ -141,6 +184,9 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 		handleMultiRange(w, ranges, responseBody, contentType, md5Sum)
 	}
 
+	// 打印响应头
+	logResponseHeaders(w, traceID)
+
 	bodyCompleteTime := time.Now()
 	fmt.Printf("Range 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Start: %s, BodyComplete: %s\n",
 		traceID, host, url, method, ranges,
@@ -150,6 +196,9 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 
 func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
 	contentType := "application/octet-stream"
+
+	// 打印请求头
+	logRequestHeaders(r, traceID)
 
 	// 添加响应头文件中的内容
 	addResponseHeaders(w)
@@ -200,6 +249,9 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 
 	closeConnectionIfNeeded(w)
 
+	// 打印响应头
+	logResponseHeaders(w, traceID)
+
 	bodyCompleteTime := time.Now()
 	fmt.Printf("响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Start: %s, HeaderSent: %s, BodyComplete: %s, BodyLength: %d\n",
 		traceID, host, url, method,
@@ -231,6 +283,9 @@ func closeConnectionIfNeeded(w http.ResponseWriter) {
 func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
 	contentType := "application/octet-stream"
 
+	// 打印请求头
+	logRequestHeaders(r, traceID)
+
 	// 添加响应头文件中的内容
 	addResponseHeaders(w)
 
@@ -256,6 +311,9 @@ func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []b
 
 	setConnectionHeader(w)
 	w.WriteHeader(http.StatusOK)
+
+	// 打印响应头
+	logResponseHeaders(w, traceID)
 
 	bodyCompleteTime := time.Now()
 	fmt.Printf("HEAD 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Content-Length: %d, Start: %s, HeaderSent: %s, BodyComplete: %s\n",

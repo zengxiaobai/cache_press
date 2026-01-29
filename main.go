@@ -67,6 +67,10 @@ type Config struct {
 	// 哈希校验配置 - 仅服务器使用
 	enableHash bool
 
+	// 日志配置 - 仅服务器使用
+	logRequestHeaders  bool // 是否打印请求头
+	logResponseHeaders bool // 是否打印响应头
+
 	// Multi Range 传输方式配置 - 仅服务器使用
 	multiRangeChunked bool // multi range 是否使用 chunked 传输 (默认 false，使用 Content-Length)
 
@@ -193,6 +197,9 @@ func init() {
 	flag.BoolVar(&config.multiRangeChunked, "multi-range-chunked", false, "multi range 使用 chunked 传输 (仅服务器模式，默认 false 使用 Content-Length)")
 	flag.BoolVar(&config.preCompress, "pre-compress", false, "预压缩整个文件后再支持 Range (仅服务器模式，类似 Nginx 的 gzip_static)")
 	flag.BoolVar(&config.testHashFailure, "test-hash-failure", false, "测试哈希校验失败 (仅客户端模式)")
+	// 日志配置 - 仅服务器使用
+	flag.BoolVar(&config.logRequestHeaders, "log-request-headers", false, "是否打印请求头 (仅服务器模式)")
+	flag.BoolVar(&config.logResponseHeaders, "log-response-headers", false, "是否打印响应头 (仅服务器模式)")
 
 	// 连接池配置 - 仅客户端使用
 	flag.IntVar(&config.maxIdleConns, "max-idle-conns", 2000, "最大空闲连接数")
@@ -472,16 +479,35 @@ func generateRandomURL(baseURL string, urlCount int, hitRatio float64) string {
 
 	id := getID()
 	if rand.Float64() <= hitRatio && id > 0 {
+		// 命中时，从已生成的URL中随机选择一个，确保均匀分布
 		randIndex := rand.Intn(int(id))
-		return genURL(baseURL, int64(randIndex))
+		// 使用哈希函数对索引进行处理，确保hash打散
+		hashedIndex := int64(hashIndex(randIndex))
+		return genURL(baseURL, hashedIndex)
 	}
 
 	if getID() < int64(urlCount) {
-		newURL := fmt.Sprintf("%s/path%d.js", baseURL, incrID())
+		// 生成新URL时，使用哈希函数对ID进行处理，确保hash打散
+		newID := incrID()
+		hashedID := hashIndex(int(newID))
+		newURL := fmt.Sprintf("%s/path%d.js", baseURL, hashedID)
 		return newURL
 	} else {
-		return fmt.Sprintf("%s/path%d_nocache_%d.js", baseURL, rand.Intn(urlCount*2), incrNotHitID())
+		// 生成nocache URL时，也使用哈希函数确保hash打散
+		randBase := rand.Intn(urlCount * 2)
+		hashedBase := hashIndex(randBase)
+		hashedNotHitID := hashIndex(int(incrNotHitID()))
+		return fmt.Sprintf("%s/path%d_nocache_%d.js", baseURL, hashedBase, hashedNotHitID)
 	}
+}
+
+// hashIndex 使用简单的哈希函数对索引进行处理，确保hash打散
+func hashIndex(index int) int {
+	// 使用斐波那契哈希法，确保分布均匀
+	const phi = 0x9E3779B9
+	index *= phi
+	index ^= index >> 16
+	return index & 0x7FFFFFFF // 确保结果为正数
 }
 
 func main() {
