@@ -44,6 +44,16 @@ func logResponseHeaders(w http.ResponseWriter, traceID string) {
 	}
 }
 
+// addRequestHeadersToResponse 将所有请求头添加到响应头中，前缀为 X-Debug-ReqHdr-
+func addRequestHeadersToResponse(w http.ResponseWriter, r *http.Request) {
+	for name, values := range r.Header {
+		for _, value := range values {
+			debugHeader := fmt.Sprintf("X-Debug-ReqHdr-%s", name)
+			w.Header().Add(debugHeader, value)
+		}
+	}
+}
+
 func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
 	compressedBody := getPreCompressedBody(responseBody, encoding)
 	contentType := "application/octet-stream"
@@ -53,6 +63,12 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 
 	ranges, err := parseRangeHeader(r.Header.Get("Range"), int64(len(compressedBody)))
 	if err != nil {
+		// 添加响应头文件中的内容
+		addResponseHeaders(w)
+
+		// 添加请求头到响应头中
+		addRequestHeadersToResponse(w, r)
+
 		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", len(compressedBody)))
 		fmt.Printf("Range 请求无效 - Trace-ID: %s, Error: %v %s\n", traceID, err, r.Header.Get("Range"))
@@ -69,6 +85,9 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 
 	// 添加响应头文件中的内容
 	addResponseHeaders(w)
+
+	// 添加请求头到响应头中
+	addRequestHeadersToResponse(w, r)
 
 	w.Header().Set("Content-Encoding", encoding)
 	// 设置 Vary 头
@@ -103,6 +122,9 @@ func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, respons
 
 	// 添加响应头文件中的内容
 	addResponseHeaders(w)
+
+	// 添加请求头到响应头中
+	addRequestHeadersToResponse(w, r)
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Encoding", encoding)
@@ -151,6 +173,12 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 
 	ranges, err := parseRangeHeader(r.Header.Get("Range"), int64(len(responseBody)))
 	if err != nil {
+		// 添加响应头文件中的内容
+		addResponseHeaders(w)
+
+		// 添加请求头到响应头中
+		addRequestHeadersToResponse(w, r)
+
 		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", len(responseBody)))
 		fmt.Printf("Range 请求无效 - Trace-ID: %s, Error: %v %s\n", traceID, err, r.Header.Get("Range"))
@@ -167,6 +195,9 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 
 	// 添加响应头文件中的内容
 	addResponseHeaders(w)
+
+	// 添加请求头到响应头中
+	addRequestHeadersToResponse(w, r)
 
 	// 设置 Vary 头
 	if len(config.varyHeaders) > 0 {
@@ -202,6 +233,9 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 
 	// 添加响应头文件中的内容
 	addResponseHeaders(w)
+
+	// 添加请求头到响应头中
+	addRequestHeadersToResponse(w, r)
 
 	w.Header().Set("Content-Type", contentType)
 	setConnectionHeader(w)
@@ -288,6 +322,9 @@ func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []b
 
 	// 添加响应头文件中的内容
 	addResponseHeaders(w)
+
+	// 添加请求头到响应头中
+	addRequestHeadersToResponse(w, r)
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
