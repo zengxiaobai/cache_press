@@ -1,13 +1,111 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 	"math/rand"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+// AccessLogEntry 访问日志条目
+type AccessLogEntry struct {
+	RequestID        string            `json:"request_id"`
+	URL              string            `json:"url"`
+	RequestHeaders   map[string]string `json:"request_headers"`
+	ResponseHeaders  map[string]string `json:"response_headers"`
+	RequestStartTime int64             `json:"request_start_time"` // 请求开始时间戳（毫秒）
+	RequestLogTime   int64             `json:"request_log_time"`   // 记录日志的时间戳（毫秒）
+}
+
+var accessLogFile *os.File
+var accessLogMutex sync.Mutex
+
+// initAccessLog 初始化访问日志
+func initAccessLog() {
+	if config.logDir == "" {
+		return
+	}
+
+	// 创建日志文件所在目录
+	dir := filepath.Dir(config.logDir)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Fatalf("Failed to create log directory: %v", err)
+	}
+
+	var err error
+	accessLogFile, err = os.OpenFile(config.logDir, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatalf("Failed to open access log file: %v", err)
+	}
+}
+
+// closeAccessLog 关闭访问日志
+func closeAccessLog() {
+	if accessLogFile != nil {
+		accessLogFile.Close()
+	}
+}
+
+// logAccess 记录访问日志
+func logAccess(requestID string, r *http.Request, w http.ResponseWriter, startTime time.Time) {
+	if config.logDir == "" {
+		return
+	}
+
+	entry := AccessLogEntry{
+		RequestID:        requestID,
+		URL:              r.URL.String(),
+		RequestHeaders:   make(map[string]string),
+		ResponseHeaders:  make(map[string]string),
+		RequestStartTime: startTime.UnixMilli(),
+		RequestLogTime:   time.Now().UnixMilli(),
+	}
+
+	// 收集请求头
+	if r.Header.Get("Range") != "" {
+		entry.RequestHeaders["Range"] = r.Header.Get("Range")
+	}
+	if r.Header.Get("Accept-Encoding") != "" {
+		entry.RequestHeaders["Accept-Encoding"] = r.Header.Get("Accept-Encoding")
+	}
+
+	// 收集响应头
+	respHeaders := w.Header()
+	if respHeaders.Get("Content-Range") != "" {
+		entry.ResponseHeaders["Content-Range"] = respHeaders.Get("Content-Range")
+	}
+	if respHeaders.Get("Transfer-Encoding") != "" {
+		entry.ResponseHeaders["Transfer-Encoding"] = respHeaders.Get("Transfer-Encoding")
+	}
+	if respHeaders.Get("Content-Length") != "" {
+		entry.ResponseHeaders["Content-Length"] = respHeaders.Get("Content-Length")
+	}
+	if respHeaders.Get("Content-Encoding") != "" {
+		entry.ResponseHeaders["Content-Encoding"] = respHeaders.Get("Content-Encoding")
+	}
+
+	// 序列化为 JSON
+	logBytes, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+
+	// 写入日志
+	accessLogMutex.Lock()
+	defer accessLogMutex.Unlock()
+	if accessLogFile != nil {
+		accessLogFile.Write(logBytes)
+		accessLogFile.WriteString("\n")
+		accessLogFile.Sync()
+	}
+}
 
 // addResponseHeaders 添加响应头文件中的内容
 func addResponseHeaders(w http.ResponseWriter) {
@@ -46,6 +144,11 @@ func logResponseHeaders(w http.ResponseWriter, traceID string) {
 
 // addRequestHeadersToResponse 将所有请求头添加到响应头中，前缀为 X-Debug-ReqHdr-
 func addRequestHeadersToResponse(w http.ResponseWriter, r *http.Request) {
+	// Host header is special - it's not in r.Header, access via r.Host
+	if r.Host != "" {
+		w.Header().Add("X-Debug-ReqHdr-Host", r.Host)
+	}
+
 	for name, values := range r.Header {
 		for _, value := range values {
 			debugHeader := fmt.Sprintf("X-Debug-ReqHdr-%s", name)
@@ -74,6 +177,8 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 		fmt.Printf("Range 请求无效 - Trace-ID: %s, Error: %v %s\n", traceID, err, r.Header.Get("Range"))
 		// 打印响应头
 		logResponseHeaders(w, traceID)
+		// 记录访问日志
+		logAccess(traceID, r, w, startTime)
 		return
 	}
 
@@ -105,6 +210,8 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 
 	// 打印响应头
 	logResponseHeaders(w, traceID)
+	// 记录访问日志
+	logAccess(traceID, r, w, startTime)
 
 	bodyCompleteTime := time.Now()
 	fmt.Printf("预压缩 Range 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Encoding: %s, Start: %s, BodyComplete: %s\n",
@@ -155,6 +262,8 @@ func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, respons
 
 	// 打印响应头
 	logResponseHeaders(w, traceID)
+	// 记录访问日志
+	logAccess(traceID, r, w, startTime)
 
 	bodyCompleteTime := time.Now()
 	fmt.Printf("预压缩响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Encoding: %s, Start: %s, HeaderSent: %s, BodyComplete: %s, BodyLength: %d\n",
@@ -184,6 +293,8 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 		fmt.Printf("Range 请求无效 - Trace-ID: %s, Error: %v %s\n", traceID, err, r.Header.Get("Range"))
 		// 打印响应头
 		logResponseHeaders(w, traceID)
+		// 记录访问日志
+		logAccess(traceID, r, w, startTime)
 		return
 	}
 
@@ -217,6 +328,8 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 
 	// 打印响应头
 	logResponseHeaders(w, traceID)
+	// 记录访问日志
+	logAccess(traceID, r, w, startTime)
 
 	bodyCompleteTime := time.Now()
 	fmt.Printf("Range 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Start: %s, BodyComplete: %s\n",
@@ -285,6 +398,8 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 
 	// 打印响应头
 	logResponseHeaders(w, traceID)
+	// 记录访问日志
+	logAccess(traceID, r, w, startTime)
 
 	bodyCompleteTime := time.Now()
 	fmt.Printf("响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Start: %s, HeaderSent: %s, BodyComplete: %s, BodyLength: %d\n",
@@ -351,6 +466,8 @@ func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []b
 
 	// 打印响应头
 	logResponseHeaders(w, traceID)
+	// 记录访问日志
+	logAccess(traceID, r, w, startTime)
 
 	bodyCompleteTime := time.Now()
 	fmt.Printf("HEAD 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Content-Length: %d, Start: %s, HeaderSent: %s, BodyComplete: %s\n",

@@ -167,9 +167,21 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func startServer() {
-	addr := fmt.Sprintf(":%d", config.port)
-	fmt.Printf("启动服务器在端口 %s\n", addr)
+	initAccessLog()
+	defer closeAccessLog()
+
+	var addr string
+	if config.listenIP != "" {
+		addr = fmt.Sprintf("%s:%d", config.listenIP, config.port)
+	} else {
+		addr = fmt.Sprintf(":%d", config.port)
+	}
+	fmt.Printf("启动服务器在 %s\n", addr)
 	fmt.Printf("服务器将根据请求头 x-press-size 的值返回对应大小的响应体\n")
+
+	if config.logDir != "" {
+		fmt.Printf("访问日志文件: %s\n", config.logDir)
+	}
 
 	http.HandleFunc("/", serverHandler)
 

@@ -57,6 +57,8 @@ type Config struct {
 	ReqIDHdrName string
 	chunkResp    float64
 	CloseConn    float64
+	logDir       string
+	listenIP     string
 
 	// 响应体缓存配置 - 仅服务器使用
 	cacheResp bool
@@ -190,7 +192,9 @@ func init() {
 	// Range 请求配置 - 仅客户端使用
 	flag.StringVar(&config.rangeStr, "range", "", "启用 Range 请求 (仅客户端模式)，格式: -range \"[0-2048,2049-5000]\"")
 	flag.BoolVar(&config.rangeRandom, "range-random", false, "在每个 range 上下限之间随机 (仅客户端模式)")
-	flag.StringVar(&config.ReqIDHdrName, "req-id-hdr-name", "X-Request-ID", "请求ID头名称")
+	flag.StringVar(&config.ReqIDHdrName, "req-id-hdr-name", "X-WYCDN-Request-ID", "请求ID头名称")
+	flag.StringVar(&config.logDir, "log-dir", "", "访问日志文件路径")
+	flag.StringVar(&config.listenIP, "listen-ip", "", "服务器监听IP (默认: 所有网卡)")
 	flag.BoolVar(&config.cacheResp, "cache-resp", true, "启用响应体缓存 (仅服务器模式)")
 	flag.BoolVar(&config.useRandomContent, "random-content", false, "使用随机内容生成响应体 (仅服务器模式，默认 false 使用重复模式)")
 	flag.BoolVar(&config.enableHash, "enable-hash", false, "启用哈希校验 (仅服务器模式)")
