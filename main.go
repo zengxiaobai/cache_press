@@ -92,6 +92,7 @@ type Config struct {
 	respRate             string   // 响应速率限制，格式: "10MB/s" 或 "100KB/s"
 	respHeaderFile       string   // 响应头文件路径 (仅服务器模式)
 	respHeaders          []string // 解析后的响应头列表 (仅服务器模式)
+	cmdRespHeaders       []string // 命令行指定的响应头列表 (仅服务器模式)
 	useChunkedTransfer   bool     // 是否使用 chunked 传输 (默认 false，使用 Content-Length)
 	vary                 string   // Vary 头配置字符串，格式: "[\"Accept-Encoding\",\"User-Agent\"]"
 	varyHeaders          []string // 解析后的 Vary 头列表
@@ -163,7 +164,7 @@ func initTransport() {
 
 func init() {
 	flag.StringVar(&config.mode, "mode", "server", "运行模式: server/client")
-	flag.IntVar(&config.port, "port", 8000, "服务器端口")
+	flag.IntVar(&config.port, "port", 9000, "服务器端口")
 	flag.StringVar(&config.host, "host", "localhost", "服务器主机名或IP")
 	flag.StringVar(&config.addr, "addr", "", "服务器完整地址 (格式: host:port)，如果设置了此参数则忽略host和port)")
 	flag.IntVar(&config.conns, "conns", 10, "并发连接数")
@@ -226,7 +227,11 @@ func init() {
 	flag.Float64Var(&config.clientSendCloseProb, "client-send-close-prob", 0.0, "发送完请求后主动断开连接的概率 (0.0-1.0)")
 	flag.Float64Var(&config.clientRecvHalfCloseProb, "client-recv-half-close-prob", 0.0, "接收响应body一半时主动断开连接的概率 (0.0-1.0)")
 	flag.Float64Var(&config.clientRecvFullCloseProb, "client-recv-full-close-prob", 0.0, "接收完响应后主动断开连接的概率 (0.0-1.0)")
-	flag.StringVar(&config.addHeaderFile, "add-header", "", "自定义请求头文件路径 (仅客户端模式，格式: 每行 header: value)")
+	flag.StringVar(&config.addHeaderFile, "req-header-file", "", "自定义请求头文件路径 (仅客户端模式，格式: 每行 header: value)")
+	flag.Func("add-resp-header", "添加响应头 (仅服务器模式，格式: \"Header: Value\"，可多次指定)", func(value string) error {
+		config.cmdRespHeaders = append(config.cmdRespHeaders, value)
+		return nil
+	})
 }
 
 func parseRespSize(respSizeStr string) []int {
@@ -475,6 +480,37 @@ func parseRespHeaderFile(filePath string) ([]string, error) {
 	return headers, nil
 }
 
+// parseCmdRespHeaders 解析命令行指定的响应头列表
+// 格式: "Header: Value"
+func parseCmdRespHeaders(headers []string) ([]string, error) {
+	if len(headers) == 0 {
+		return nil, nil
+	}
+
+	var result []string
+	for _, headerLine := range headers {
+		headerLine = strings.TrimSpace(headerLine)
+		if headerLine == "" {
+			continue
+		}
+
+		// 查找冒号分隔符
+		colonIndex := strings.Index(headerLine, ":")
+		if colonIndex == -1 {
+			return nil, fmt.Errorf("无效的响应头格式: %s (应为 \"Header: Value\")", headerLine)
+		}
+
+		headerName := strings.TrimSpace(headerLine[:colonIndex])
+		headerValue := strings.TrimSpace(headerLine[colonIndex+1:])
+
+		if headerName != "" {
+			result = append(result, headerName, headerValue)
+		}
+	}
+
+	return result, nil
+}
+
 func generateRandomURL(baseURL string, urlCount int, hitRatio float64) string {
 	if len(config.fixedURLs) > 0 {
 		randIndex := rand.Intn(len(config.fixedURLs))
@@ -535,6 +571,30 @@ func main() {
 		fmt.Printf("警告: 解析响应头文件失败: %v\n", err)
 	}
 	config.respHeaders = respHeaders
+
+	// 解析命令行指定的响应头
+	cmdRespHeaders, err := parseCmdRespHeaders(config.cmdRespHeaders)
+	if err != nil {
+		log.Fatalf("无效的响应头参数: %v", err)
+	}
+	// 合并响应头：先加文件中的，再加命令行中的（命令行优先级更高，可覆盖）
+	if len(cmdRespHeaders) > 0 {
+		if config.respHeaders == nil {
+			config.respHeaders = cmdRespHeaders
+		} else {
+			config.respHeaders = append(config.respHeaders, cmdRespHeaders...)
+		}
+	}
+
+	// 打印使用的响应头
+	if len(config.respHeaders) > 0 {
+		fmt.Printf("服务器将使用以下响应头:\n")
+		for i := 0; i < len(config.respHeaders); i += 2 {
+			if i+1 < len(config.respHeaders) {
+				fmt.Printf("  %s: %s\n", config.respHeaders[i], config.respHeaders[i+1])
+			}
+		}
+	}
 
 	// 解析响应速率限制
 	if config.respRate != "" {

@@ -107,6 +107,70 @@ func logAccess(requestID string, r *http.Request, w http.ResponseWriter, startTi
 	}
 }
 
+// parseXRespAddHeader 解析 X-Resp-Add-Header 请求头
+// 格式: "Header: Value"，支持多个用逗号分隔
+func parseXRespAddHeader(headerValue string) ([]string, error) {
+	if headerValue == "" {
+		return nil, nil
+	}
+
+	// 去除两端的引号
+	headerValue = strings.Trim(headerValue, "\"'")
+	if headerValue == "" {
+		return nil, nil
+	}
+
+	var result []string
+
+	// 分割多个头（用逗号分隔）
+	headerParts := strings.Split(headerValue, ",")
+	for _, part := range headerParts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		// 查找冒号分隔符
+		colonIndex := strings.Index(part, ":")
+		if colonIndex == -1 {
+			return nil, fmt.Errorf("无效的响应头格式: %s (应为 \"Header: Value\")", part)
+		}
+
+		name := strings.TrimSpace(part[:colonIndex])
+		value := strings.TrimSpace(part[colonIndex+1:])
+
+		if name != "" {
+			result = append(result, name, value)
+		}
+	}
+
+	return result, nil
+}
+
+// addXRespAddHeaders 从 X-Resp-Add-Header- 开头的请求头中添加响应头
+// 支持格式:
+//
+//	X-Resp-Add-Header-cache-control: max-age=10
+//	X-Resp-Add-Header-test1: 2
+func addXRespAddHeaders(w http.ResponseWriter, r *http.Request) {
+	const prefix = "X-Resp-Add-Header-"
+
+	for name, values := range r.Header {
+		if !strings.HasPrefix(strings.ToLower(name), strings.ToLower(prefix)) {
+			continue
+		}
+
+		respHeaderName := name[len(prefix):]
+		if respHeaderName == "" {
+			continue
+		}
+
+		for _, value := range values {
+			w.Header().Set(respHeaderName, value)
+		}
+	}
+}
+
 // addResponseHeaders 添加响应头文件中的内容
 func addResponseHeaders(w http.ResponseWriter) {
 	for i := 0; i < len(config.respHeaders); i += 2 {
@@ -169,6 +233,9 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 		// 添加响应头文件中的内容
 		addResponseHeaders(w)
 
+		// 添加 X-Resp-Add-Header 请求头中的响应头（优先级更高，可覆盖）
+		addXRespAddHeaders(w, r)
+
 		// 添加请求头到响应头中
 		addRequestHeadersToResponse(w, r)
 
@@ -190,6 +257,9 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 
 	// 添加响应头文件中的内容
 	addResponseHeaders(w)
+
+	// 添加 X-Resp-Add-Header 请求头中的响应头（优先级更高，可覆盖）
+	addXRespAddHeaders(w, r)
 
 	// 添加请求头到响应头中
 	addRequestHeadersToResponse(w, r)
@@ -229,6 +299,9 @@ func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, respons
 
 	// 添加响应头文件中的内容
 	addResponseHeaders(w)
+
+	// 添加 X-Resp-Add-Header 请求头中的响应头（优先级更高，可覆盖）
+	addXRespAddHeaders(w, r)
 
 	// 添加请求头到响应头中
 	addRequestHeadersToResponse(w, r)
@@ -285,6 +358,9 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 		// 添加响应头文件中的内容
 		addResponseHeaders(w)
 
+		// 添加 X-Resp-Add-Header 请求头中的响应头（优先级更高，可覆盖）
+		addXRespAddHeaders(w, r)
+
 		// 添加请求头到响应头中
 		addRequestHeadersToResponse(w, r)
 
@@ -306,6 +382,9 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 
 	// 添加响应头文件中的内容
 	addResponseHeaders(w)
+
+	// 添加 X-Resp-Add-Header 请求头中的响应头（优先级更高，可覆盖）
+	addXRespAddHeaders(w, r)
 
 	// 添加请求头到响应头中
 	addRequestHeadersToResponse(w, r)
@@ -346,6 +425,9 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 
 	// 添加响应头文件中的内容
 	addResponseHeaders(w)
+
+	// 添加 X-Resp-Add-Header 请求头中的响应头（优先级更高，可覆盖）
+	addXRespAddHeaders(w, r)
 
 	// 添加请求头到响应头中
 	addRequestHeadersToResponse(w, r)
@@ -437,6 +519,9 @@ func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []b
 
 	// 添加响应头文件中的内容
 	addResponseHeaders(w)
+
+	// 添加 X-Resp-Add-Header 请求头中的响应头（优先级更高，可覆盖）
+	addXRespAddHeaders(w, r)
 
 	// 添加请求头到响应头中
 	addRequestHeadersToResponse(w, r)
