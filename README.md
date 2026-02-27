@@ -27,6 +27,13 @@ cache_press 是一个用于测试缓存服务器性能的压测工具，支持�
 | `-addr` | 服务器完整地址 (格式: host:port)，如果设置了此参数则忽略host和port | "" | 所有 |
 | `-log-dir` | 日志目录 | "" | 所有 |
 | `-listen-ip` | 服务器监听IP | "" | 所有 |
+| `-enable-https` | 是否启用 HTTPS | false | 所有 |
+| `-enable-http` | 是否启用 HTTP (默认 true) | true | 所有 |
+| `-http-port` | HTTP 端口 (默认与 port 相同) | 0 | 所有 |
+| `-cert-file` | 证书文件路径 (启用 HTTPS 时必需，除非使用 --generate-cert) | "" | 所有 |
+| `-key-file` | 私钥文件路径 (启用 HTTPS 时必需，除非使用 --generate-cert) | "" | 所有 |
+| `-generate-cert` | 是否生成自签证书 | false | 所有 |
+| `-enable-sni` | 是否启用 SNI 校验 (默认 false) | false | 所有 |
 
 ### 客户端专用参数
 
@@ -159,11 +166,61 @@ cache_press 是一个用于测试缓存服务器性能的压测工具，支持�
 ./cache_press -mode=server -port=9000 -resp-rate="10MB/s"
 ```
 
+#### 启用 HTTPS 的服务端
+```bash
+# 基本 HTTPS 服务器
+./cache_press -mode=server -port=443 -enable-https=true -cert-file=cert.pem -key-file=key.pem
+
+# 启用 HTTPS 并添加自定义响应头
+./cache_press -mode=server -port=443 \
+  -enable-https=true \
+  -cert-file=cert.pem \
+  -key-file=key.pem \
+  -add-resp-header="Cache-Control: max-age=3600"
+
+# 启用 HTTPS 并限制响应速率
+./cache_press -mode=server -port=443 \
+  -enable-https=true \
+  -cert-file=cert.pem \
+  -key-file=key.pem \
+  -resp-rate="5MB/s"
+
+# 同时启用 HTTP 和 HTTPS（不同端口）
+./cache_press -mode=server -port=443 -http-port=8080 \
+  -enable-https=true -enable-http=true \
+  -cert-file=cert.pem -key-file=key.pem
+
+# 生成自签证书并启动 HTTPS 服务器
+./cache_press -mode=server -port=443 \
+  -enable-https=true -generate-cert=true
+
+# 启用 SNI 校验
+./cache_press -mode=server -port=443 \
+  -enable-https=true -enable-sni=true \
+  -cert-file=cert.pem -key-file=key.pem
+
+# 只启用 HTTPS（关闭 HTTP）
+./cache_press -mode=server -port=443 \
+  -enable-https=true -enable-http=false \
+  -cert-file=cert.pem -key-file=key.pem
+```
+
 ### 客户端示例
 
 #### 基本客户端
 ```bash
 ./cache_press -mode=client -addr=192.168.1.100:8080 -conns=100 -qps=1000 -duration=60s
+```
+
+#### 连接 HTTPS 服务器的客户端
+```bash
+# 连接 HTTPS 服务器
+./cache_press -mode=client -addr=192.168.1.100:443 -conns=100 -qps=1000 -duration=60s
+
+# 连接 HTTPS 服务器并使用固定 URL 列表
+./cache_press -mode=client -addr=192.168.1.100:443 \
+  -fixed-url="/path1.js,/path2.js,/path3.js" \
+  -hit-ratio=1.0 -conns=50 -qps=500 -duration=30s
 ```
 
 #### 高命中率的CDN测试

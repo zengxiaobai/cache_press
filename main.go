@@ -60,6 +60,13 @@ type Config struct {
 	logDir       string
 	listenIP     string
 
+	// HTTPS 配置 - 仅服务器使用
+	httpsPort    int    // HTTPS 端口（默认 0，表示不启用 HTTPS）
+	certFile     string // 证书文件路径
+	keyFile      string // 私钥文件路径
+	generateCert string // 生成自签证书的域名（为空表示不生成）
+	enableSNI    bool   // 是否启用 SNI 校验（默认 false）
+
 	// 响应体缓存配置 - 仅服务器使用
 	cacheResp bool
 
@@ -205,6 +212,13 @@ func init() {
 	// 日志配置 - 仅服务器使用
 	flag.BoolVar(&config.logRequestHeaders, "log-request-headers", false, "是否打印请求头 (仅服务器模式)")
 	flag.BoolVar(&config.logResponseHeaders, "log-response-headers", false, "是否打印响应头 (仅服务器模式)")
+
+	// HTTPS 配置 - 仅服务器使用
+	flag.IntVar(&config.httpsPort, "https-port", 0, "HTTPS 端口 (仅服务器模式，默认 0，表示不启用 HTTPS)")
+	flag.StringVar(&config.certFile, "cert-file", "", "证书文件路径 (仅服务器模式，启用 HTTPS 时必需，除非使用 --generate-cert)")
+	flag.StringVar(&config.keyFile, "key-file", "", "私钥文件路径 (仅服务器模式，启用 HTTPS 时必需，除非使用 --generate-cert)")
+	flag.StringVar(&config.generateCert, "generate-cert", "", "生成自签证书的域名 (仅服务器模式，为空表示不生成)")
+	flag.BoolVar(&config.enableSNI, "enable-sni", false, "是否启用 SNI 校验 (仅服务器模式，默认 false)")
 
 	// 连接池配置 - 仅客户端使用
 	flag.IntVar(&config.maxIdleConns, "max-idle-conns", 2000, "最大空闲连接数")
