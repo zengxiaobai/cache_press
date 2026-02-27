@@ -40,6 +40,7 @@ type Config struct {
 	urlCount            int
 	fixedURLStr         string   // 固定 URL 列表字符串 (仅客户端使用，URI格式，不含host)
 	fixedURLs           []string // 固定 URL 列表 (仅客户端使用，URI格式，不含host)
+	urlSuffix           string   // URL 后缀 (仅客户端使用，默认为 .js)
 	maxRequests         int      // 最大请求数量 (仅客户端使用，0表示不限制)
 	compareAddr         string   // Range 请求时用于对比 hash 的地址 (仅客户端使用)
 	ignoreErr           bool
@@ -187,6 +188,7 @@ func init() {
 	flag.Float64Var(&config.hitRatio, "hit-ratio", 0.5, "CDN命中率 (0.0-1.0)")
 	flag.IntVar(&config.urlCount, "url-count", 1000000, "总URL数量")
 	flag.StringVar(&config.fixedURLStr, "fixed-url", "", "固定 URL 列表 (仅客户端模式，URI格式，不含host，多个用逗号分隔)")
+	flag.StringVar(&config.urlSuffix, "url-suffix", ".js", "URL 后缀 (仅客户端模式，默认为 .js)")
 	flag.IntVar(&config.maxRequests, "max-requests", 0, "最大请求数量 (仅客户端模式，0表示不限制)")
 	flag.BoolVar(&config.ignoreErr, "ignore-err", false, "忽略错误")
 	flag.IntVar(&config.deferStart, "defer-start", 0, "延迟启动时间(秒)")
@@ -287,7 +289,7 @@ func getRandomResponse(sizeRange []int, ratio float64) []byte {
 }
 
 func genURL(baseURL string, id int64) string {
-	return fmt.Sprintf("%s/path%d.js", baseURL, id)
+	return fmt.Sprintf("%s/path%d%s", baseURL, id, config.urlSuffix)
 }
 
 var id, notHitID int64
@@ -544,14 +546,14 @@ func generateRandomURL(baseURL string, urlCount int, hitRatio float64) string {
 		// 生成新URL时，使用哈希函数对ID进行处理，确保hash打散
 		newID := incrID()
 		hashedID := hashIndex(int(newID))
-		newURL := fmt.Sprintf("%s/path%d.js", baseURL, hashedID)
+		newURL := fmt.Sprintf("%s/path%d%s", baseURL, hashedID, config.urlSuffix)
 		return newURL
 	} else {
 		// 生成nocache URL时，也使用哈希函数确保hash打散
 		randBase := rand.Intn(urlCount * 2)
 		hashedBase := hashIndex(randBase)
 		hashedNotHitID := hashIndex(int(incrNotHitID()))
-		return fmt.Sprintf("%s/path%d_nocache_%d.js", baseURL, hashedBase, hashedNotHitID)
+		return fmt.Sprintf("%s/path%d_nocache_%d%s", baseURL, hashedBase, hashedNotHitID, config.urlSuffix)
 	}
 }
 

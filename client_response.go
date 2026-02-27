@@ -41,7 +41,7 @@ func readResponseBody(resp *http.Response, requestStartTime time.Time) responseR
 		return result
 	}
 
-	xCacheHeader := resp.Header.Get("X-Cache")
+	xCacheHeader := resp.Header.Get("X-Wycdn-Cache-Status")
 	result.cacheHit = strings.Contains(xCacheHeader, "HIT")
 
 	var totalExpected int64
