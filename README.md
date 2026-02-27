@@ -102,6 +102,7 @@ cache_press 是一个用于测试缓存服务器性能的压测工具，支持�
 | `Host` | 虚拟主机名 | `example.com` |
 | `Connection` | 连接控制 | `keep-alive` 或 `close` |
 | `X-Resp-Add-Header` | 动态添加响应头（格式: "Header: Value"，支持多个用逗号分隔） | `Cache-Control: max-age=3600` 或 `Cache-Control: max-age=3600, X-Custom: value` |
+| `X-Mock-304` | 触发服务器返回 304 Not Modified 响应（无响应体，但响应头保持不变） | 任意值（如 "true"） |
 
 ### 服务器响应头
 
@@ -210,6 +211,21 @@ EOF
 # 使用请求头文件运行客户端
 ./cache_press -mode=client -addr=192.168.1.100:8080 \
   -req-header-file=req-header.txt -conns=100 -qps=1000 -duration=60s
+```
+
+#### 使用 X-Mock-304 请求头测试 304 响应
+```bash
+# 使用 curl 测试 304 响应
+curl -v -H "X-Mock-304: true" http://192.168.1.100:8080/test.js
+
+# 创建请求头文件 req-header.txt
+cat > req-header-304.txt << EOF
+X-Mock-304: true
+EOF
+
+# 使用 cache_press 客户端发送 304 请求
+./cache_press -mode=client -addr=192.168.1.100:8080 \
+  -req-header-file=req-header-304.txt -conns=100 -qps=1000 -duration=60s
 ```
 
 ## 配置文件示例

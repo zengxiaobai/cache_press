@@ -144,6 +144,12 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 处理 X-Mock-304 请求头 - 返回 304 响应但保持响应头不变
+	if r.Header.Get("X-Mock-304") != "" {
+		handle304Response(w, r, responseBody, encoding, traceID, method, host, url, startTime)
+		return
+	}
+
 	if method == "HEAD" {
 		handleHeadResponse(w, r, responseBody, encoding, traceID, method, host, url, startTime)
 		return

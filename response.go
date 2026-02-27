@@ -492,6 +492,56 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 		len(responseBody))
 }
 
+func handle304Response(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
+	contentType := "application/octet-stream"
+
+	// 打印请求头
+	logRequestHeaders(r, traceID)
+
+	// 添加响应头文件中的内容
+	addResponseHeaders(w)
+
+	// 添加 X-Resp-Add-Header 请求头中的响应头（优先级更高，可覆盖）
+	addXRespAddHeaders(w, r)
+
+	// 添加请求头到响应头中
+	addRequestHeadersToResponse(w, r)
+
+	w.Header().Set("Content-Type", contentType)
+	setConnectionHeader(w)
+
+	// 设置 Vary 头
+	if len(config.varyHeaders) > 0 {
+		w.Header().Set("Vary", strings.Join(config.varyHeaders, ", "))
+	} else if encoding != "" {
+		w.Header().Set("Vary", "Accept-Encoding")
+	}
+
+	if encoding != "" {
+		w.Header().Set("Content-Encoding", encoding)
+	}
+
+	if config.enableHash {
+		md5Sum := calculateMD5(responseBody)
+		w.Header().Set("X-Content-MD5", md5Sum)
+		fmt.Printf("304 响应 MD5 - Trace-ID: %s, 大小: %d, MD5: %s\n", traceID, len(responseBody), md5Sum)
+	}
+
+	// 304 响应没有响应体，但可以保留 Content-Length 头
+	w.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
+
+	w.WriteHeader(http.StatusNotModified)
+
+	// 打印响应头
+	logResponseHeaders(w, traceID)
+	// 记录访问日志
+	logAccess(traceID, r, w, startTime)
+
+	fmt.Printf("304 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Start: %s\n",
+		traceID, host, url, method,
+		startTime.Format("2006-01-02 15:04:05.000"))
+}
+
 func setConnectionHeader(w http.ResponseWriter) {
 	if config.keepAliveProb > 0 && rand.Float64() <= config.keepAliveProb {
 		w.Header().Set("Connection", "keep-alive")
