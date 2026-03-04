@@ -127,7 +127,12 @@ func readResponseBody(resp *http.Response, requestStartTime time.Time) responseR
 
 		if !isRangeRequest && serverMD5 != "" {
 			if calculatedMD5 != serverMD5 {
-				fmt.Printf("MD5校验失败! 服务器MD5: %s, 客户端计算MD5: %s %s\n", serverMD5, calculatedMD5, string(bodyData))
+				traceID := resp.Request.Header.Get(config.ReqIDHdrName)
+				if traceID == "" {
+					traceID = "unknown"
+				}
+				fmt.Printf("MD5校验失败! Trace-ID: %s, 服务器MD5: %s, 客户端计算MD5: %s\n", traceID, serverMD5, calculatedMD5)
+				fmt.Printf("数据长度: 客户端=%d, 服务器=%d\n", len(bodyData), totalExpected)
 				if !config.ignoreErr {
 					os.Exit(1)
 				}
