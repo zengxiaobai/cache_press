@@ -101,10 +101,10 @@ func serverGetRespSize(r *http.Request) int {
 		if err == nil {
 			responseSize = parsedSize
 		} else {
-			responseSize = 1024
+			responseSize = defaultRespSize
 		}
 	} else {
-		responseSize = 1024
+		responseSize = defaultRespSize
 	}
 	return responseSize
 }

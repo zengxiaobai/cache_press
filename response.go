@@ -147,14 +147,16 @@ func parseXRespAddHeader(headerValue string) ([]string, error) {
 	return result, nil
 }
 
-// addXRespAddHeaders 从 X-Resp-Add-Header- 开头的请求头中添加响应头
+// addXRespAddHeaders 从 X-Resp-Add-Header- 开头的请求头和 X-Resp-Add-Header 请求头中添加响应头
 // 支持格式:
 //
 //	X-Resp-Add-Header-cache-control: max-age=10
 //	X-Resp-Add-Header-test1: 2
+//	X-Resp-Add-Header: "Cache-Control: max-age=10, Content-Type: text/plain"
 func addXRespAddHeaders(w http.ResponseWriter, r *http.Request) {
 	const prefix = "X-Resp-Add-Header-"
 
+	// 处理 X-Resp-Add-Header- 开头的请求头
 	for name, values := range r.Header {
 		if !strings.HasPrefix(strings.ToLower(name), strings.ToLower(prefix)) {
 			continue
@@ -167,6 +169,20 @@ func addXRespAddHeaders(w http.ResponseWriter, r *http.Request) {
 
 		for _, value := range values {
 			w.Header().Set(respHeaderName, value)
+		}
+	}
+
+	// 处理 X-Resp-Add-Header 请求头
+	if headerValue := r.Header.Get("X-Resp-Add-Header"); headerValue != "" {
+		headers, err := parseXRespAddHeader(headerValue)
+		if err == nil && len(headers) > 0 {
+			for i := 0; i < len(headers); i += 2 {
+				if i+1 < len(headers) {
+					headerName := headers[i]
+					headerValue := headers[i+1]
+					w.Header().Set(headerName, headerValue)
+				}
+			}
 		}
 	}
 }

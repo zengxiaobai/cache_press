@@ -127,6 +127,7 @@ type reqStatInfo struct {
 
 var config Config
 var transport *http.Transport
+var defaultRespSize int // 默认响应大小（服务器模式）
 
 var reqStatCh chan reqStatInfo
 
@@ -625,6 +626,17 @@ func main() {
 
 	switch config.mode {
 	case "server":
+		// 解析服务器模式的响应大小
+		respSizeRange := parseRespSize(config.respSizeStr)
+		if len(respSizeRange) == 1 {
+			defaultRespSize = respSizeRange[0]
+		} else if len(respSizeRange) == 2 {
+			// 范围模式下，使用最大值作为默认值
+			defaultRespSize = respSizeRange[1]
+		} else {
+			defaultRespSize = 1024
+		}
+		fmt.Printf("服务器默认响应大小: %d 字节\n", defaultRespSize)
 		startServer()
 	case "client":
 		// 解析客户端请求头文件
