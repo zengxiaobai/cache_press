@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"sync/atomic"
 	"syscall"
@@ -29,6 +30,9 @@ type Config struct {
 	qps        int
 	duration   time.Duration
 	tickerDump time.Duration
+
+	// pprof 配置
+	pprofPort int
 
 	// 响应大小配置 - 仅客户端使用
 	respSizeStr   string
@@ -180,6 +184,7 @@ func init() {
 	flag.IntVar(&config.qps, "qps", 100, "QPS限制")
 	flag.DurationVar(&config.duration, "duration", 30*time.Second, "压测持续时间")
 	flag.DurationVar(&config.tickerDump, "ticker-dump", 5*time.Second, "定时输出统计信息间隔")
+	flag.IntVar(&config.pprofPort, "pprof-port", 0, "pprof 监听端口 (0 表示不启用)")
 
 	// 响应大小配置 - 仅客户端使用
 	flag.StringVar(&config.respSizeStr, "resp-size", "1024", "响应大小，格式: 单个数字或范围 [min,max]")
@@ -569,6 +574,26 @@ func hashIndex(index int) int {
 
 func main() {
 	flag.Parse()
+
+	// 启动 pprof 服务器
+	if config.pprofPort > 0 {
+		go func() {
+			pprofAddr := fmt.Sprintf(":%d", config.pprofPort)
+			fmt.Printf("pprof 服务器已启动，监听地址: %s\n", pprofAddr)
+
+			// 注册 pprof 处理器
+			mux := http.NewServeMux()
+			mux.HandleFunc("/debug/pprof/", pprof.Index)
+			mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+			mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+			mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+			mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
+			if err := http.ListenAndServe(pprofAddr, mux); err != nil {
+				log.Printf("pprof 服务器启动失败: %v\n", err)
+			}
+		}()
+	}
 
 	config.enableRange = config.rangeStr != ""
 

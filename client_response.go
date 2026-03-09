@@ -53,11 +53,6 @@ func readResponseBody(resp *http.Response, requestStartTime time.Time) responseR
 	isRangeRequest := resp.Request != nil && resp.Request.Header.Get("Range") != ""
 	shouldCalculateHash := serverMD5 != "" || (isRangeRequest && config.compareAddr != "")
 
-	var bodyData []byte
-	if shouldCalculateHash {
-		bodyData = make([]byte, 0, 1024*1024)
-	}
-
 	isMultiRange := strings.Contains(resp.Header.Get("Content-Type"), "multipart/byteranges")
 	var boundary string
 	if isMultiRange {
@@ -66,23 +61,31 @@ func readResponseBody(resp *http.Response, requestStartTime time.Time) responseR
 			boundary = ct[idx+9:]
 		}
 	}
-
-	const chunkSize = 35840
+	var bodyData buffer.IoBuffer
+	if shouldCalculateHash {
+		bodyData = buffer.NewIoBuffer(1024 * 1024)
+	}
 	chunkPtr := buffer.GetBytes(35840)
-	chunk := *chunkPtr
+	defer func() {
+		if bodyData != nil {
+			buffer.PutIoBuffer(bodyData)
+		}
+		buffer.PutBytes(chunkPtr)
+	}()
+
 
 	reader := resp.Body
 	for {
-		n, readErr := reader.Read(chunk)
+		n, readErr := reader.Read(*chunkPtr)
 		if n > 0 {
 			result.readBytes += int64(n)
 			if shouldCalculateHash {
 				if isMultiRange && boundary != "" {
-					data := chunk[:n]
+					data := (*chunkPtr)[:n]
 					filteredData := filterMultipartBoundary(data, boundary)
-					bodyData = append(bodyData, filteredData...)
+					bodyData.Write(filteredData)
 				} else {
-					bodyData = append(bodyData, chunk[:n]...)
+					bodyData.Write((*chunkPtr)[:n])
 				}
 			}
 		}
@@ -106,10 +109,9 @@ func readResponseBody(resp *http.Response, requestStartTime time.Time) responseR
 			break
 		}
 	}
-	buffer.PutBytes(chunkPtr)
 
 	if shouldCalculateHash {
-		calculatedMD5 := fmt.Sprintf("%x", xxHash32.Checksum(bodyData, 0))
+		calculatedMD5 := fmt.Sprintf("%x", xxHash32.Checksum(bodyData.Bytes(), 0))
 
 		if config.testHashFailure {
 			if len(calculatedMD5) > 0 {
@@ -132,7 +134,7 @@ func readResponseBody(resp *http.Response, requestStartTime time.Time) responseR
 					traceID = "unknown"
 				}
 				fmt.Printf("MD5校验失败! Trace-ID: %s, 服务器MD5: %s, 客户端计算MD5: %s\n", traceID, serverMD5, calculatedMD5)
-				fmt.Printf("数据长度: 客户端=%d, 服务器=%d\n", len(bodyData), totalExpected)
+				fmt.Printf("数据长度: 客户端=%d, 服务器=%d\n", len(bodyData.Bytes()), totalExpected)
 				if !config.ignoreErr {
 					os.Exit(1)
 				}
