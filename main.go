@@ -75,6 +75,9 @@ type Config struct {
 	// 响应体缓存配置 - 仅服务器使用
 	cacheResp bool
 
+	// etag 配置 - 仅服务器使用
+	etag bool
+
 	// 响应体内容配置 - 仅服务器使用
 	useRandomContent bool // 是否使用随机内容生成响应体 (默认 false，使用重复模式)
 
@@ -219,6 +222,7 @@ func init() {
 	flag.StringVar(&config.logDir, "log-dir", "", "访问日志文件路径")
 	flag.StringVar(&config.listenIP, "listen-ip", "", "服务器监听IP (默认: 所有网卡)")
 	flag.BoolVar(&config.cacheResp, "cache-resp", true, "启用响应体缓存 (仅服务器模式)")
+	flag.BoolVar(&config.etag, "etag", false, "是否根据响应内容生成 etag 头 (仅服务器模式)")
 	flag.BoolVar(&config.useRandomContent, "random-content", false, "使用随机内容生成响应体 (仅服务器模式，默认 false 使用重复模式)")
 	flag.BoolVar(&config.enableHash, "enable-hash", false, "启用哈希校验 (仅服务器模式)")
 	flag.BoolVar(&config.multiRangeChunked, "multi-range-chunked", false, "multi range 使用 chunked 传输 (仅服务器模式，默认 false 使用 Content-Length)")

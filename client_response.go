@@ -28,7 +28,7 @@ func readResponseBody(resp *http.Response, requestStartTime time.Time) responseR
 	result := responseResult{}
 
 	if resp.StatusCode > 300 {
-		result.err = fmt.Errorf("请求失败: %s", resp.StatusCode)
+		result.err = fmt.Errorf("请求失败: %d", resp.StatusCode)
 		return result
 	}
 

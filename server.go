@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"cache_press/pkg/buffer"
+	"crypto/md5"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"log"
@@ -21,8 +23,14 @@ import (
 	"time"
 )
 
+// respCacheItem 存储响应体和对应的 etag
+type respCacheItem struct {
+	body []byte
+	etag string
+}
+
 var (
-	respCache      = make(map[int][]byte)
+	respCache      = make(map[int]respCacheItem)
 	respCacheMutex sync.RWMutex
 )
 
@@ -175,26 +183,48 @@ func createRespBodyCont(size int) []byte {
 	return buf.Bytes()
 }
 
-func genRespBody(responseSize int) []byte {
+func genRespBody(responseSize int) ([]byte, string) {
 	var responseBody []byte
+	var etag string
 	if config.cacheResp {
 		respCacheMutex.RLock()
 		var ok bool
-		responseBody, ok = respCache[responseSize]
+		var item respCacheItem
+		item, ok = respCache[responseSize]
 		respCacheMutex.RUnlock()
 		if !ok {
 			newBody := createRespBodyCont(responseSize)
+			newEtag := ""
+			if config.etag {
+				// 使用 MD5 算法计算响应内容的哈希值
+				hash := md5.Sum(newBody)
+				// 将哈希值转换为十六进制字符串
+				newEtag = hex.EncodeToString(hash[:])
+			}
 			respCacheMutex.Lock()
 			defer respCacheMutex.Unlock()
 			if _, ok := respCache[responseSize]; !ok {
-				respCache[responseSize] = newBody
+				respCache[responseSize] = respCacheItem{
+					body: newBody,
+					etag: newEtag,
+				}
 			}
 			responseBody = newBody
+			etag = newEtag
+		} else {
+			responseBody = item.body
+			etag = item.etag
 		}
 	} else {
 		responseBody = createRespBodyCont(responseSize)
+		if config.etag {
+			// 使用 MD5 算法计算响应内容的哈希值
+			hash := md5.Sum(responseBody)
+			// 将哈希值转换为十六进制字符串
+			etag = hex.EncodeToString(hash[:])
+		}
 	}
-	return responseBody
+	return responseBody, etag
 }
 
 func serverHandler(w http.ResponseWriter, r *http.Request) {
@@ -207,7 +237,7 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 	url := r.URL.String()
 
 	responseSize := serverGetRespSize(r)
-	responseBody := genRespBody(responseSize)
+	responseBody, etag := genRespBody(responseSize)
 
 	ae := r.Header.Get("Accept-Encoding")
 	var encoding string
@@ -221,30 +251,30 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 处理 X-Mock-Resp-Code 请求头 - 返回自定义状态码响应
 	if mockRespCode := r.Header.Get("X-Mock-Resp-Code"); mockRespCode != "" {
-		handleMockResponse(w, r, responseBody, encoding, traceID, method, host, url, startTime, mockRespCode)
+		handleMockResponse(w, r, responseBody, encoding, etag, traceID, method, host, url, startTime, mockRespCode)
 		return
 	}
 
 	if method == "HEAD" {
-		handleHeadResponse(w, r, responseBody, encoding, traceID, method, host, url, startTime)
+		handleHeadResponse(w, r, responseBody, encoding, etag, traceID, method, host, url, startTime)
 		return
 	}
 
 	if config.preCompress && encoding != "" {
 		if r.Header.Get("Range") != "" {
-			handlePreCompressedRange(w, r, responseBody, encoding, traceID, method, host, url, startTime)
+			handlePreCompressedRange(w, r, responseBody, encoding, etag, traceID, method, host, url, startTime)
 		} else {
-			handlePreCompressedResponse(w, r, responseBody, encoding, traceID, method, host, url, startTime)
+			handlePreCompressedResponse(w, r, responseBody, encoding, etag, traceID, method, host, url, startTime)
 		}
 		return
 	}
 
 	if r.Header.Get("Range") != "" {
-		handleRangeRequest(w, r, responseBody, traceID, method, host, url, startTime)
+		handleRangeRequest(w, r, responseBody, etag, traceID, method, host, url, startTime)
 		return
 	}
 
-	handleNormalResponse(w, r, responseBody, encoding, traceID, method, host, url, startTime)
+	handleNormalResponse(w, r, responseBody, encoding, etag, traceID, method, host, url, startTime)
 }
 
 func startServer() {

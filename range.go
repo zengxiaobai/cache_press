@@ -13,7 +13,7 @@ type Range struct {
 	End   int64
 }
 
-func writeWithRateLimit(w http.ResponseWriter, data []byte) {
+func writeWithRateLimit(w http.ResponseWriter, data []byte) (total int, err error) {
 	if config.sendBytesPerInterval <= 0 || config.sendIntervalMs <= 0 {
 		_, _ = w.Write(data)
 		return
@@ -28,17 +28,24 @@ func writeWithRateLimit(w http.ResponseWriter, data []byte) {
 			chunkSize = dataLen - offset
 		}
 
-		_, _ = w.Write(data[offset : offset+chunkSize])
+		var n int
+		n, err = w.Write(data[offset : offset+chunkSize])
+		total += n
+		if err != nil {
+			return
+		}
 		offset += chunkSize
 
 		if offset < dataLen {
 			time.Sleep(time.Duration(config.sendIntervalMs) * time.Millisecond)
 		}
 	}
+	return
 }
 
-func sendData(w http.ResponseWriter, data []byte) {
-	writeWithRateLimit(w, data)
+func sendData(w http.ResponseWriter, data []byte) (total int, err error) {
+	total, err = writeWithRateLimit(w, data)
+	return
 }
 
 func parseRangeHeader(rangeHeader string, contentLength int64) ([]Range, error) {
@@ -139,7 +146,8 @@ func handleSingleRange(w http.ResponseWriter, r Range, responseBody []byte, cont
 	}
 	w.WriteHeader(http.StatusPartialContent)
 
-	sendData(w, responseBody[r.Start:r.End+1])
+	total, err := sendData(w, responseBody[r.Start:r.End+1])
+	fmt.Printf("Single range response sent - Start: %d, End: %d, TotalSent: %d, Error: %v\n", r.Start, r.End, total, err)
 }
 
 func handleMultiRange(w http.ResponseWriter, ranges []Range, responseBody []byte, contentType string, md5Sum string) {
@@ -163,7 +171,8 @@ func handleMultiRange(w http.ResponseWriter, ranges []Range, responseBody []byte
 		_, _ = fmt.Fprintf(w, "Content-Type: %s\r\n", contentType)
 		_, _ = fmt.Fprintf(w, "Content-Range: bytes %d-%d/%d\r\n", r.Start, r.End, contentLength)
 		_, _ = fmt.Fprintf(w, "\r\n")
-		sendData(w, responseBody[r.Start:r.End+1])
+		total, err := sendData(w, responseBody[r.Start:r.End+1])
+		fmt.Printf("Multi range part sent - Start: %d, End: %d, TotalSent: %d, Error: %v\n", r.Start, r.End, total, err)
 		_, _ = fmt.Fprintf(w, "\r\n")
 	}
 

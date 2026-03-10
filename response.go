@@ -22,6 +22,8 @@ type AccessLogEntry struct {
 	ResponseHeaders  map[string]string `json:"response_headers"`
 	RequestStartTime int64             `json:"request_start_time"` // 请求开始时间戳（毫秒）
 	RequestLogTime   int64             `json:"request_log_time"`   // 记录日志的时间戳（毫秒）
+	TotalSent        int               `json:"total_sent"`         // 实际发送的字节数
+	Error            string            `json:"error"`              // 发送过程中的错误
 }
 
 var accessLogFile *os.File
@@ -54,7 +56,7 @@ func closeAccessLog() {
 }
 
 // logAccess 记录访问日志
-func logAccess(requestID string, r *http.Request, w http.ResponseWriter, startTime time.Time) {
+func logAccess(requestID string, r *http.Request, w http.ResponseWriter, startTime time.Time, total int, err error) {
 	if config.logDir == "" {
 		return
 	}
@@ -66,6 +68,12 @@ func logAccess(requestID string, r *http.Request, w http.ResponseWriter, startTi
 		ResponseHeaders:  make(map[string]string),
 		RequestStartTime: startTime.UnixMilli(),
 		RequestLogTime:   time.Now().UnixMilli(),
+		TotalSent:        total,
+		Error:            "",
+	}
+
+	if err != nil {
+		entry.Error = err.Error()
 	}
 
 	// 收集请求头
@@ -237,7 +245,7 @@ func addRequestHeadersToResponse(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
+func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, etag string, traceID, method, host, url string, startTime time.Time) {
 	compressedBody := getPreCompressedBody(responseBody, encoding)
 	contentType := "application/octet-stream"
 
@@ -261,7 +269,7 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 		// 打印响应头
 		logResponseHeaders(w, traceID)
 		// 记录访问日志
-		logAccess(traceID, r, w, startTime)
+		logAccess(traceID, r, w, startTime, 0, nil)
 		return
 	}
 
@@ -297,16 +305,16 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 	// 打印响应头
 	logResponseHeaders(w, traceID)
 	// 记录访问日志
-	logAccess(traceID, r, w, startTime)
+	logAccess(traceID, r, w, startTime, 0, nil)
 
 	bodyCompleteTime := time.Now()
 	fmt.Printf("预压缩 Range 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Encoding: %s, Start: %s, BodyComplete: %s\n",
-		traceID, host, url, method, ranges,
+		traceID, host, url, method, ranges, encoding,
 		startTime.Format("2006-01-02 15:04:05.000"),
 		bodyCompleteTime.Format("2006-01-02 15:04:05.000"))
 }
 
-func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
+func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, etag string, traceID, method, host, url string, startTime time.Time) {
 	compressedBody := getPreCompressedBody(responseBody, encoding)
 	contentType := "application/octet-stream"
 
@@ -341,29 +349,37 @@ func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, respons
 		fmt.Printf("预压缩响应 MD5 - Trace-ID: %s, 大小: %d, MD5: %s\n", traceID, len(compressedBody), md5Sum)
 	}
 
+	// 生成 etag 头
+	if config.etag && etag != "" {
+		// 设置 ETag 响应头
+		w.Header().Set("ETag", fmt.Sprintf("\"%s\"", etag))
+		fmt.Printf("预压缩响应 ETag - Trace-ID: %s, 大小: %d, ETag: %s\n", traceID, len(compressedBody), etag)
+	}
+
 	setConnectionHeader(w)
 	w.WriteHeader(http.StatusOK)
 	headerSendTime := time.Now()
 	serveBodyWithDelay()
-	sendData(w, compressedBody)
+	total, err := sendData(w, compressedBody)
+	fmt.Printf("sendData compressed: total=%d, err=%v\n", total, err)
 
 	closeConnectionIfNeeded(w)
 
 	// 打印响应头
 	logResponseHeaders(w, traceID)
 	// 记录访问日志
-	logAccess(traceID, r, w, startTime)
+	logAccess(traceID, r, w, startTime, total, err)
 
 	bodyCompleteTime := time.Now()
-	fmt.Printf("预压缩响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Encoding: %s, Start: %s, HeaderSent: %s, BodyComplete: %s, BodyLength: %d\n",
+	fmt.Printf("预压缩响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Encoding: %s, Start: %s, HeaderSent: %s, BodyComplete: %s, BodyLength: %d, TotalSent: %d, Error: %v\n",
 		traceID, host, url, method, encoding,
 		startTime.Format("2006-01-02 15:04:05.000"),
 		headerSendTime.Format("2006-01-02 15:04:05.000"),
 		bodyCompleteTime.Format("2006-01-02 15:04:05.000"),
-		len(compressedBody))
+		len(compressedBody), total, err)
 }
 
-func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []byte, traceID, method, host, url string, startTime time.Time) {
+func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []byte, etag string, traceID, method, host, url string, startTime time.Time) {
 	contentType := "application/octet-stream"
 
 	// 打印请求头
@@ -386,7 +402,7 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 		// 打印响应头
 		logResponseHeaders(w, traceID)
 		// 记录访问日志
-		logAccess(traceID, r, w, startTime)
+		logAccess(traceID, r, w, startTime, 0, nil)
 		return
 	}
 
@@ -424,7 +440,7 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 	// 打印响应头
 	logResponseHeaders(w, traceID)
 	// 记录访问日志
-	logAccess(traceID, r, w, startTime)
+	logAccess(traceID, r, w, startTime, 0, nil)
 
 	bodyCompleteTime := time.Now()
 	fmt.Printf("Range 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Start: %s, BodyComplete: %s\n",
@@ -433,7 +449,7 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 		bodyCompleteTime.Format("2006-01-02 15:04:05.000"))
 }
 
-func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
+func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, etag string, traceID, method, host, url string, startTime time.Time) {
 	contentType := "application/octet-stream"
 
 	// 打印请求头
@@ -472,6 +488,13 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 		}
 	}
 
+	// 生成 etag 头
+	if config.etag && etag != "" {
+		// 设置 ETag 响应头
+		w.Header().Set("ETag", fmt.Sprintf("\"%s\"", etag))
+		fmt.Printf("ETag 已启用，响应大小: %d, ETag: %s\n", len(responseBody), etag)
+	}
+
 	if !config.useChunkedTransfer {
 		if encoding != "" {
 			compressedBody := getPreCompressedBody(responseBody, encoding)
@@ -485,11 +508,13 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 	headerSendTime := time.Now()
 	serveBodyWithDelay()
 
+	var total int
+	var err error
 	if encoding != "" {
 		compressedBody := getPreCompressedBody(responseBody, encoding)
-		sendData(w, compressedBody)
+		total, err = sendData(w, compressedBody)
 	} else {
-		sendData(w, responseBody)
+		total, err = sendData(w, responseBody)
 	}
 
 	closeConnectionIfNeeded(w)
@@ -497,15 +522,15 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 	// 打印响应头
 	logResponseHeaders(w, traceID)
 	// 记录访问日志
-	logAccess(traceID, r, w, startTime)
+	logAccess(traceID, r, w, startTime, total, err)
 
 	bodyCompleteTime := time.Now()
-	fmt.Printf("响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Start: %s, HeaderSent: %s, BodyComplete: %s, BodyLength: %d\n",
+	fmt.Printf("响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Start: %s, HeaderSent: %s, BodyComplete: %s,BodyLength: %d, TotalSent: %d, Error: %v\n",
 		traceID, host, url, method,
 		startTime.Format("2006-01-02 15:04:05.000"),
 		headerSendTime.Format("2006-01-02 15:04:05.000"),
 		bodyCompleteTime.Format("2006-01-02 15:04:05.000"),
-		len(responseBody))
+		len(responseBody), total, err)
 }
 
 func handle304Response(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
@@ -551,14 +576,14 @@ func handle304Response(w http.ResponseWriter, r *http.Request, responseBody []by
 	// 打印响应头
 	logResponseHeaders(w, traceID)
 	// 记录访问日志
-	logAccess(traceID, r, w, startTime)
+	logAccess(traceID, r, w, startTime, 0, nil)
 
 	fmt.Printf("304 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Start: %s\n",
 		traceID, host, url, method,
 		startTime.Format("2006-01-02 15:04:05.000"))
 }
 
-func handleMockResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time, mockRespCode string) {
+func handleMockResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, etag string, traceID, method, host, url string, startTime time.Time, mockRespCode string) {
 	// 解析状态码
 	statusCode, err := strconv.Atoi(mockRespCode)
 	if err != nil || statusCode < 100 || statusCode >= 599 {
@@ -595,20 +620,42 @@ func handleMockResponse(w http.ResponseWriter, r *http.Request, responseBody []b
 		fmt.Printf("Mock %d 响应 MD5 - Trace-ID: %s, 大小: %d, MD5: %s\n", statusCode, traceID, len(responseBody), md5Sum)
 	}
 
-	// 所有 mock 状态码都不返回响应体内容
+	// 检查是否需要遵循 x-press-size 等语义
+	// 如果响应体不为空且不是 204 No Content，应该返回响应体
+	hasResponseBody := len(responseBody) > 0 && statusCode != http.StatusNoContent
+
 	// 对于 204 No Content，不应该设置 Content-Length
 	if statusCode != http.StatusNoContent {
-		// 对于其他状态码，可以设置 Content-Length 为 0
-		w.Header().Set("Content-Length", "0")
+		if hasResponseBody {
+			// 如果有响应体，设置正确的 Content-Length
+			w.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
+		} else {
+			// 对于其他状态码，可以设置 Content-Length 为 0
+			w.Header().Set("Content-Length", "0")
+		}
 	}
+
 	w.WriteHeader(statusCode)
 
-	logResponseHeaders(w, traceID)
-	logAccess(traceID, r, w, startTime)
+	// 如果需要返回响应体
+	var total int
+	if hasResponseBody {
+		if encoding != "" {
+			compressedBody := getPreCompressedBody(responseBody, encoding)
+			total, err = sendData(w, compressedBody)
+			fmt.Printf("sendData compressed: total=%d, err=%v\n", total, err)
+		} else {
+			total, err = sendData(w, responseBody)
+			fmt.Printf("sendData: total=%d, err=%v\n", total, err)
+		}
+	}
 
-	fmt.Printf("Mock 响应完成 - Status: %d, Trace-ID: %s, URL: %s, Method: %s, Host: %s, Start: %s\n",
+	logResponseHeaders(w, traceID)
+	logAccess(traceID, r, w, startTime, total, err)
+
+	fmt.Printf("Mock 响应完成 - Status: %d, Trace-ID: %s, URL: %s, Method: %s, Host: %s, Start: %s, TotalSent: %d, Error: %v\n",
 		statusCode, traceID, url, method, host,
-		startTime.Format("2006-01-02 15:04:05.000"))
+		startTime.Format("2006-01-02 15:04:05.000"), total, err)
 }
 
 func setConnectionHeader(w http.ResponseWriter) {
@@ -630,7 +677,7 @@ func closeConnectionIfNeeded(w http.ResponseWriter) {
 	}
 }
 
-func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
+func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, etag string, traceID, method, host, url string, startTime time.Time) {
 	contentType := "application/octet-stream"
 
 	// 打印请求头
@@ -665,13 +712,20 @@ func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []b
 		fmt.Printf("HEAD 响应 MD5 - Trace-ID: %s, 大小: %d, MD5: %s\n", traceID, len(responseBody), md5Sum)
 	}
 
+	// 生成 etag 头
+	if config.etag && etag != "" {
+		// 设置 ETag 响应头
+		w.Header().Set("ETag", fmt.Sprintf("\"%s\"", etag))
+		fmt.Printf("HEAD 响应 ETag - Trace-ID: %s, 大小: %d, ETag: %s\n", traceID, len(responseBody), etag)
+	}
+
 	setConnectionHeader(w)
 	w.WriteHeader(http.StatusOK)
 
 	// 打印响应头
 	logResponseHeaders(w, traceID)
 	// 记录访问日志
-	logAccess(traceID, r, w, startTime)
+	logAccess(traceID, r, w, startTime, 0, nil)
 
 	bodyCompleteTime := time.Now()
 	fmt.Printf("HEAD 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Content-Length: %d, Start: %s, HeaderSent: %s, BodyComplete: %s\n",
