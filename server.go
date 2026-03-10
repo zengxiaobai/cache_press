@@ -219,9 +219,9 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 处理 X-Mock-304 请求头 - 返回 304 响应但保持响应头不变
-	if r.Header.Get("X-Mock-304") != "" {
-		handle304Response(w, r, responseBody, encoding, traceID, method, host, url, startTime)
+	// 处理 X-Mock-Resp-Code 请求头 - 返回自定义状态码响应
+	if mockRespCode := r.Header.Get("X-Mock-Resp-Code"); mockRespCode != "" {
+		handleMockResponse(w, r, responseBody, encoding, traceID, method, host, url, startTime, mockRespCode)
 		return
 	}
 
@@ -309,9 +309,24 @@ func startServer() {
 		// 控制 SNI 校验
 		if !config.enableSNI {
 			tlsConfig.InsecureSkipVerify = true
-			tlsConfig.GetCertificate = func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-				return &cert, nil
-			}
+		}
+
+		// 添加 SNI 打印功能
+		tlsConfig.GetCertificate = func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			// 打印 SNI 到文件
+			go func() {
+				f, err := os.OpenFile("/tmp/cache_press.sni.output", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+				if err != nil {
+					log.Printf("打开 SNI 输出文件失败: %v", err)
+					return
+				}
+				defer f.Close()
+				_, err = fmt.Fprintf(f, "%s\n", clientHello.ServerName)
+				if err != nil {
+					log.Printf("写入 SNI 到文件失败: %v", err)
+				}
+			}()
+			return &cert, nil
 		}
 
 		httpsServer := &http.Server{

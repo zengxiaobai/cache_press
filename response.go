@@ -558,6 +558,59 @@ func handle304Response(w http.ResponseWriter, r *http.Request, responseBody []by
 		startTime.Format("2006-01-02 15:04:05.000"))
 }
 
+func handleMockResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time, mockRespCode string) {
+	// 解析状态码
+	statusCode, err := strconv.Atoi(mockRespCode)
+	if err != nil || statusCode < 100 || statusCode >= 599 {
+		fmt.Printf("无效的 X-Mock-Resp-Code 值: %s，使用默认 304\n", mockRespCode)
+		statusCode = http.StatusNotModified
+	}
+
+	contentType := "application/octet-stream"
+
+	logRequestHeaders(r, traceID)
+
+	addResponseHeaders(w)
+
+	addXRespAddHeaders(w, r)
+
+	addRequestHeadersToResponse(w, r)
+
+	w.Header().Set("Content-Type", contentType)
+	setConnectionHeader(w)
+
+	if len(config.varyHeaders) > 0 {
+		w.Header().Set("Vary", strings.Join(config.varyHeaders, ", "))
+	} else if encoding != "" {
+		w.Header().Set("Vary", "Accept-Encoding")
+	}
+
+	if encoding != "" {
+		w.Header().Set("Content-Encoding", encoding)
+	}
+
+	if config.enableHash {
+		md5Sum := calculateMD5(responseBody)
+		w.Header().Set("X-Content-MD5", md5Sum)
+		fmt.Printf("Mock %d 响应 MD5 - Trace-ID: %s, 大小: %d, MD5: %s\n", statusCode, traceID, len(responseBody), md5Sum)
+	}
+
+	// 所有 mock 状态码都不返回响应体内容
+	// 对于 204 No Content，不应该设置 Content-Length
+	if statusCode != http.StatusNoContent {
+		// 对于其他状态码，可以设置 Content-Length 为 0
+		w.Header().Set("Content-Length", "0")
+	}
+	w.WriteHeader(statusCode)
+
+	logResponseHeaders(w, traceID)
+	logAccess(traceID, r, w, startTime)
+
+	fmt.Printf("Mock 响应完成 - Status: %d, Trace-ID: %s, URL: %s, Method: %s, Host: %s, Start: %s\n",
+		statusCode, traceID, url, method, host,
+		startTime.Format("2006-01-02 15:04:05.000"))
+}
+
 func setConnectionHeader(w http.ResponseWriter) {
 	if config.keepAliveProb > 0 && rand.Float64() <= config.keepAliveProb {
 		w.Header().Set("Connection", "keep-alive")
