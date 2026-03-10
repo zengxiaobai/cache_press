@@ -266,37 +266,35 @@ func startServer() {
 
 	http.HandleFunc("/", serverHandler)
 
+	// 设置默认端口
+	if len(config.ports) == 0 {
+		config.ports = []int{9000}
+	}
+
 	// 启动 HTTP 服务器
-	httpAddr := fmt.Sprintf(":%d", config.port)
-	if config.listenIP != "" {
-		httpAddr = fmt.Sprintf("%s:%d", config.listenIP, config.port)
-	}
-
-	httpServer := &http.Server{
-		Addr:              httpAddr,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
-	fmt.Printf("HTTP 服务器监听地址: %s\n", httpAddr)
-	go func() {
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP 服务器启动失败: %v", err)
+	for _, port := range config.ports {
+		httpAddr := fmt.Sprintf(":%d", port)
+		if config.listenIP != "" {
+			httpAddr = fmt.Sprintf("%s:%d", config.listenIP, port)
 		}
-	}()
+
+		httpServer := &http.Server{
+			Addr:              httpAddr,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+
+		fmt.Printf("HTTP 服务器监听地址: %s\n", httpAddr)
+		go func(addr string, srv *http.Server) {
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("HTTP 服务器启动失败 (地址: %s): %v", addr, err)
+			}
+		}(httpAddr, httpServer)
+	}
 
 	// 启动 HTTPS 服务器
-	if config.httpsPort > 0 {
+	if len(config.httpsPorts) > 0 {
 		if config.certFile == "" || config.keyFile == "" {
 			log.Fatalf("启用 HTTPS 时必须指定证书文件和私钥文件，或使用 --generate-cert 生成自签证书")
-		}
-
-		httpsAddr := fmt.Sprintf(":%d", config.httpsPort)
-		if config.listenIP != "" {
-			httpsAddr = fmt.Sprintf("%s:%d", config.listenIP, config.httpsPort)
-		}
-
-		tlsConfig := &tls.Config{
-			MinVersion: tls.VersionTLS12,
 		}
 
 		// 加载证书
@@ -304,44 +302,57 @@ func startServer() {
 		if err != nil {
 			log.Fatalf("加载证书失败: %v", err)
 		}
-		tlsConfig.Certificates = []tls.Certificate{cert}
 
-		// 控制 SNI 校验
-		if !config.enableSNI {
-			tlsConfig.InsecureSkipVerify = true
-		}
+		for _, port := range config.httpsPorts {
+			httpsAddr := fmt.Sprintf(":%d", port)
+			if config.listenIP != "" {
+				httpsAddr = fmt.Sprintf("%s:%d", config.listenIP, port)
+			}
 
-		// 添加 SNI 打印功能
-		tlsConfig.GetCertificate = func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			// 打印 SNI 到文件
-			go func() {
-				f, err := os.OpenFile("/tmp/cache_press.sni.output", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-				if err != nil {
-					log.Printf("打开 SNI 输出文件失败: %v", err)
-					return
+			tlsConfig := &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			}
+			tlsConfig.Certificates = []tls.Certificate{cert}
+
+			// 控制 SNI 校验
+			if !config.enableSNI {
+				tlsConfig.InsecureSkipVerify = true
+			}
+
+			// 添加 SNI 打印功能
+			tlsConfig.GetCertificate = func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				// 打印 SNI 到文件
+				go func() {
+					f, err := os.OpenFile("/tmp/cache_press.sni.output", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+					if err != nil {
+						log.Printf("打开 SNI 输出文件失败: %v", err)
+						return
+					}
+					defer f.Close()
+					_, err = fmt.Fprintf(f, "%s\n", clientHello.ServerName)
+					if err != nil {
+						log.Printf("写入 SNI 到文件失败: %v", err)
+					}
+				}()
+				return &cert, nil
+			}
+
+			httpsServer := &http.Server{
+				Addr:              httpsAddr,
+				ReadHeaderTimeout: 10 * time.Second,
+				TLSConfig:         tlsConfig,
+			}
+
+			fmt.Printf("HTTPS 服务器监听地址: %s\n", httpsAddr)
+			go func(addr string, srv *http.Server) {
+				if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+					log.Fatalf("HTTPS 服务器启动失败 (地址: %s): %v", addr, err)
 				}
-				defer f.Close()
-				_, err = fmt.Fprintf(f, "%s\n", clientHello.ServerName)
-				if err != nil {
-					log.Printf("写入 SNI 到文件失败: %v", err)
-				}
-			}()
-			return &cert, nil
+			}(httpsAddr, httpsServer)
 		}
 
-		httpsServer := &http.Server{
-			Addr:              httpsAddr,
-			ReadHeaderTimeout: 10 * time.Second,
-			TLSConfig:         tlsConfig,
-		}
-
-		fmt.Printf("HTTPS 服务器监听地址: %s\n", httpsAddr)
-		fmt.Printf("启用 HTTPS，证书文件: %s, 私钥文件: %s\n", config.certFile, config.keyFile)
-		fmt.Printf("SNI 校验: %v\n", config.enableSNI)
-
-		if err := httpsServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTPS 服务器启动失败: %v", err)
-		}
+		// 启用了 HTTPS 服务器，需要阻塞
+		select {}
 	} else {
 		// 如果只启动了 HTTP 服务器，需要阻塞
 		select {}

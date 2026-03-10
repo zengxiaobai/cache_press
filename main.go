@@ -23,7 +23,7 @@ import (
 
 type Config struct {
 	mode       string
-	port       int
+	ports      []int // HTTP 端口列表（默认 [9000]）
 	host       string
 	addr       string
 	conns      int
@@ -66,7 +66,7 @@ type Config struct {
 	listenIP     string
 
 	// HTTPS 配置 - 仅服务器使用
-	httpsPort    int    // HTTPS 端口（默认 0，表示不启用 HTTPS）
+	httpsPorts   []int  // HTTPS 端口列表（默认 []，表示不启用 HTTPS）
 	certFile     string // 证书文件路径
 	keyFile      string // 私钥文件路径
 	generateCert string // 生成自签证书的域名（为空表示不生成）
@@ -177,7 +177,14 @@ func initTransport() {
 
 func init() {
 	flag.StringVar(&config.mode, "mode", "server", "运行模式: server/client")
-	flag.IntVar(&config.port, "port", 9000, "服务器端口")
+	flag.Func("port", "服务器端口（可多次指定）", func(value string) error {
+		port, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("无效的端口号: %s", value)
+		}
+		config.ports = append(config.ports, port)
+		return nil
+	})
 	flag.StringVar(&config.host, "host", "localhost", "服务器主机名或IP")
 	flag.StringVar(&config.addr, "addr", "", "服务器完整地址 (格式: host:port)，如果设置了此参数则忽略host和port)")
 	flag.IntVar(&config.conns, "conns", 10, "并发连接数")
@@ -222,7 +229,14 @@ func init() {
 	flag.BoolVar(&config.logResponseHeaders, "log-response-headers", false, "是否打印响应头 (仅服务器模式)")
 
 	// HTTPS 配置 - 仅服务器使用
-	flag.IntVar(&config.httpsPort, "https-port", 0, "HTTPS 端口 (仅服务器模式，默认 0，表示不启用 HTTPS)")
+	flag.Func("https-port", "HTTPS 端口 (仅服务器模式，可多次指定，默认不启用 HTTPS)", func(value string) error {
+		port, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("无效的端口号: %s", value)
+		}
+		config.httpsPorts = append(config.httpsPorts, port)
+		return nil
+	})
 	flag.StringVar(&config.certFile, "cert-file", "", "证书文件路径 (仅服务器模式，启用 HTTPS 时必需，除非使用 --generate-cert)")
 	flag.StringVar(&config.keyFile, "key-file", "", "私钥文件路径 (仅服务器模式，启用 HTTPS 时必需，除非使用 --generate-cert)")
 	flag.StringVar(&config.generateCert, "generate-cert", "", "生成自签证书的域名 (仅服务器模式，为空表示不生成)")

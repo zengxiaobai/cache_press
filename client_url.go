@@ -12,5 +12,9 @@ func getBaseURL() string {
 		}
 		return config.addr
 	}
-	return fmt.Sprintf("http://%s:%d", config.host, config.port)
+	port := 9000
+	if len(config.ports) > 0 {
+		port = config.ports[0]
+	}
+	return fmt.Sprintf("http://%s:%d", config.host, port)
 }
