@@ -249,6 +249,14 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 处理 X-Mock-302-Location-Map 请求头 - 返回 302 重定向
+	if locationMap := r.Header.Get("X-Mock-302-Location-Map"); locationMap != "" {
+		handled := handleMock302Redirect(w, r, locationMap, traceID, method, host, url, startTime)
+		if handled {
+			return
+		}
+	}
+
 	// 处理 X-Mock-Resp-Code 请求头 - 返回自定义状态码响应
 	if mockRespCode := r.Header.Get("X-Mock-Resp-Code"); mockRespCode != "" {
 		handleMockResponse(w, r, responseBody, encoding, etag, traceID, method, host, url, startTime, mockRespCode)

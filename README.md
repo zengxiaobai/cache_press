@@ -110,6 +110,7 @@ cache_press 是一个用于测试缓存服务器性能的压测工具，支持�
 | `Connection` | 连接控制 | `keep-alive` 或 `close` |
 | `X-Resp-Add-Header` | 动态添加响应头（格式: "Header: Value"，支持多个用逗号分隔） | `Cache-Control: max-age=3600` 或 `Cache-Control: max-age=3600, X-Custom: value` |
 | `X-Mock-304` | 触发服务器返回 304 Not Modified 响应（无响应体，但响应头保持不变） | 任意值（如 "true"） |
+| `X-Mock-302-Location-Map` | 触发服务器返回 302 重定向响应，值为 JSON 格式的映射表 | `[{"orig":"http://example.com/path1","location":"http://example.com/path2"}]` |
 
 ### 服务器响应头
 
@@ -283,6 +284,22 @@ EOF
 # 使用 cache_press 客户端发送 304 请求
 ./cache_press -mode=client -addr=192.168.1.100:8080 \
   -req-header-file=req-header-304.txt -conns=100 -qps=1000 -duration=60s
+```
+
+#### 使用 X-Mock-302-Location-Map 请求头测试 302 重定向
+```bash
+# 使用 curl 测试 302 重定向
+curl -v -H "X-Mock-302-Location-Map: [{\"orig\":\"http://example.com/path1\",\"location\":\"http://example.com/path2\"}]" \
+  http://192.168.1.100:8080/path1
+
+# 创建请求头文件 req-header-302.txt
+cat > req-header-302.txt << EOF
+X-Mock-302-Location-Map: [{"orig":"http://example.com/path1","location":"http://example.com/path2"}]
+EOF
+
+# 使用 cache_press 客户端发送 302 请求
+./cache_press -mode=client -addr=192.168.1.100:8080 \
+  -req-header-file=req-header-302.txt -fixed-url="/path1" -conns=100 -qps=1000 -duration=60s
 ```
 
 ## 配置文件示例

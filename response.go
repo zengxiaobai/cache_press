@@ -451,6 +451,7 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 
 func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, etag string, traceID, method, host, url string, startTime time.Time) {
 	contentType := "application/octet-stream"
+	var requestURL string
 
 	// 打印请求头
 	logRequestHeaders(r, traceID)
@@ -458,14 +459,18 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 	// 添加响应头文件中的内容
 	addResponseHeaders(w)
 
-	// 添加 X-Resp-Add-Header 请求头中的响应头（优先级更高，可覆盖）
-	addXRespAddHeaders(w, r)
-
 	// 添加请求头到响应头中
 	addRequestHeadersToResponse(w, r)
 
 	w.Header().Set("Content-Type", contentType)
 	setConnectionHeader(w)
+
+	// 添加 X-Resp-Add-Header 请求头中的响应头（优先级更高，可覆盖）
+	addXRespAddHeaders(w, r)
+
+	// 添加 x-debug-req-url 头
+	requestURL = buildRequestURL(r, host, url)
+	w.Header().Set("X-Debug-Req-Url", requestURL)
 
 	// 设置 Vary 头
 	if len(config.varyHeaders) > 0 {
@@ -535,6 +540,7 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 
 func handle304Response(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
 	contentType := "application/octet-stream"
+	var requestURL string
 
 	// 打印请求头
 	logRequestHeaders(r, traceID)
@@ -542,14 +548,18 @@ func handle304Response(w http.ResponseWriter, r *http.Request, responseBody []by
 	// 添加响应头文件中的内容
 	addResponseHeaders(w)
 
-	// 添加 X-Resp-Add-Header 请求头中的响应头（优先级更高，可覆盖）
-	addXRespAddHeaders(w, r)
-
 	// 添加请求头到响应头中
 	addRequestHeadersToResponse(w, r)
 
 	w.Header().Set("Content-Type", contentType)
 	setConnectionHeader(w)
+
+	// 添加 X-Resp-Add-Header 请求头中的响应头（优先级更高，可覆盖）
+	addXRespAddHeaders(w, r)
+
+	// 添加 x-debug-req-url 头
+	requestURL = buildRequestURL(r, host, url)
+	w.Header().Set("X-Debug-Req-Url", requestURL)
 
 	// 设置 Vary 头
 	if len(config.varyHeaders) > 0 {
@@ -583,9 +593,85 @@ func handle304Response(w http.ResponseWriter, r *http.Request, responseBody []by
 		startTime.Format("2006-01-02 15:04:05.000"))
 }
 
+type mockLocationMap struct {
+	Orig     string `json:"orig"`
+	Location string `json:"location"`
+}
+
+func handleMock302Redirect(w http.ResponseWriter, r *http.Request, locationMapJSON, traceID, method, host, url string, startTime time.Time) bool {
+	var locationMaps []mockLocationMap
+	if err := json.Unmarshal([]byte(locationMapJSON), &locationMaps); err != nil {
+		fmt.Printf("无效的 X-Mock-302-Location-Map JSON 格式: %s, 错误: %v\n", locationMapJSON, err)
+		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+		return true
+	}
+
+	// 构建完整的请求 URL
+	requestURL := buildRequestURL(r, host, url)
+
+	var redirectLocation string
+	for _, m := range locationMaps {
+		if m.Orig == requestURL {
+			redirectLocation = m.Location
+			break
+		}
+	}
+
+	if redirectLocation == "" {
+		fmt.Printf("Mock 302 未命中 - Trace-ID: %s, RequestURL: %s\n", traceID, requestURL)
+		return false
+	}
+
+	// 添加响应头文件中的内容
+	addResponseHeaders(w)
+
+	// 添加请求头到响应头中
+	addRequestHeadersToResponse(w, r)
+
+	// 添加 X-Resp-Add-Header 请求头中的响应头
+	addXRespAddHeaders(w, r)
+
+	w.Header().Set("X-Debug-Req-Url", requestURL)
+	w.Header().Set("Location", redirectLocation)
+	w.WriteHeader(http.StatusFound)
+
+	logAccess(traceID, r, w, startTime, 0, nil)
+
+	fmt.Printf("Mock 302 重定向 - Trace-ID: %s, RequestURL: %s, Location: %s, Method: %s, Host: %s, Start: %s\n",
+		traceID, requestURL, redirectLocation, method, host,
+		startTime.Format("2006-01-02 15:04:05.000"))
+	return true
+}
+
+// buildRequestURL 构建完整的请求 URL
+func buildRequestURL(r *http.Request, host, url string) string {
+	requestURL := url
+	if !strings.HasPrefix(requestURL, "http://") && !strings.HasPrefix(requestURL, "https://") {
+		proto := r.Header.Get("X-Forwarded-Proto")
+		if proto == "" {
+			if r.TLS != nil {
+				proto = "https"
+			} else {
+				proto = "http"
+			}
+		}
+		requestURL = fmt.Sprintf("%s://%s%s", proto, host, requestURL)
+	}
+
+	// 清理 URL，去除可能的重复部分
+	if strings.Contains(requestURL, "http://http://") {
+		requestURL = strings.Replace(requestURL, "http://http://", "http://", 1)
+	} else if strings.Contains(requestURL, "https://https://") {
+		requestURL = strings.Replace(requestURL, "https://https://", "https://", 1)
+	}
+
+	return requestURL
+}
+
 func handleMockResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, etag string, traceID, method, host, url string, startTime time.Time, mockRespCode string) {
 	// 解析状态码
 	statusCode, err := strconv.Atoi(mockRespCode)
+	var requestURL string
 	if err != nil || statusCode < 100 || statusCode >= 599 {
 		fmt.Printf("无效的 X-Mock-Resp-Code 值: %s，使用默认 304\n", mockRespCode)
 		statusCode = http.StatusNotModified
@@ -597,12 +683,18 @@ func handleMockResponse(w http.ResponseWriter, r *http.Request, responseBody []b
 
 	addResponseHeaders(w)
 
-	addXRespAddHeaders(w, r)
-
+	// 添加请求头到响应头中
 	addRequestHeadersToResponse(w, r)
 
 	w.Header().Set("Content-Type", contentType)
 	setConnectionHeader(w)
+
+	// 添加 x-debug-req-url 头
+	requestURL = buildRequestURL(r, host, url)
+	w.Header().Set("X-Debug-Req-Url", requestURL)
+
+	// 添加 X-Resp-Add-Header 请求头中的响应头（优先级更高，可覆盖）
+	addXRespAddHeaders(w, r)
 
 	if len(config.varyHeaders) > 0 {
 		w.Header().Set("Vary", strings.Join(config.varyHeaders, ", "))
@@ -679,6 +771,7 @@ func closeConnectionIfNeeded(w http.ResponseWriter) {
 
 func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, etag string, traceID, method, host, url string, startTime time.Time) {
 	contentType := "application/octet-stream"
+	var requestURL string
 
 	// 打印请求头
 	logRequestHeaders(r, traceID)
@@ -694,6 +787,10 @@ func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []b
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
+
+	// 添加 x-debug-req-url 头
+	requestURL = buildRequestURL(r, host, url)
+	w.Header().Set("X-Debug-Req-Url", requestURL)
 
 	// 设置 Vary 头
 	if len(config.varyHeaders) > 0 {
