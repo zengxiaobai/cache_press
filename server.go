@@ -256,6 +256,16 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 	responseSize := serverGetRespSize(r)
 	responseBody, etag := genRespBody(responseSize)
 
+	// 检查请求头是否控制 chunked 传输
+	useChunked := config.useChunkedTransfer
+	if chunkedHeader := r.Header.Get("X-Use-Chunked-Transfer"); chunkedHeader != "" {
+		if chunkedHeader == "true" || chunkedHeader == "1" {
+			useChunked = true
+		} else if chunkedHeader == "false" || chunkedHeader == "0" {
+			useChunked = false
+		}
+	}
+
 	ae := r.Header.Get("Accept-Encoding")
 	var encoding string
 	if ae != "" {
@@ -299,7 +309,7 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	handleNormalResponse(wrapper, r, responseBody, encoding, etag, traceID, method, host, url, startTime)
+	handleNormalResponse(wrapper, r, responseBody, encoding, etag, useChunked, traceID, method, host, url, startTime)
 }
 
 func startServer() {

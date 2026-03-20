@@ -493,7 +493,7 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 		bodyCompleteTime.Format("2006-01-02 15:04:05.000"))
 }
 
-func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, etag string, traceID, method, host, url string, startTime time.Time) {
+func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, etag string, useChunked bool, traceID, method, host, url string, startTime time.Time) {
 	contentType := "application/octet-stream"
 	var requestURL string
 
@@ -544,13 +544,16 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 		fmt.Printf("ETag 已启用，响应大小: %d, ETag: %s\n", len(responseBody), etag)
 	}
 
-	if !config.useChunkedTransfer {
+	if !useChunked {
 		if encoding != "" {
 			compressedBody := getPreCompressedBody(responseBody, encoding)
 			w.Header().Set("Content-Length", strconv.Itoa(len(compressedBody)))
 		} else {
 			w.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
 		}
+	} else {
+		// 显式设置 chunked 传输编码
+		w.Header().Set("Transfer-Encoding", "chunked")
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -560,8 +563,15 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 	var total int
 	var err error
 	if encoding != "" {
-		compressedBody := getPreCompressedBody(responseBody, encoding)
-		total, err = sendData(w, compressedBody)
+		if useChunked {
+			// 使用流式压缩（chunk 流式压缩响应）
+			err = streamCompressedBody(w, responseBody, encoding)
+			total = len(responseBody)
+		} else {
+			// 使用预压缩
+			compressedBody := getPreCompressedBody(responseBody, encoding)
+			total, err = sendData(w, compressedBody)
+		}
 	} else {
 		total, err = sendData(w, responseBody)
 	}
