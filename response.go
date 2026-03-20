@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 // AccessLogEntry 访问日志条目
@@ -23,10 +26,11 @@ type AccessLogEntry struct {
 	RequestStartTime int64             `json:"request_start_time"` // 请求开始时间戳（毫秒）
 	RequestLogTime   int64             `json:"request_log_time"`   // 记录日志的时间戳（毫秒）
 	TotalSent        int               `json:"total_sent"`         // 实际发送的字节数
+	StatusCode       int               `json:"status_code"`        // 响应状态码
 	Error            string            `json:"error"`              // 发送过程中的错误
 }
 
-var accessLogFile *os.File
+var accessLogWriter io.Writer
 var accessLogMutex sync.Mutex
 
 // initAccessLog 初始化访问日志
@@ -41,22 +45,28 @@ func initAccessLog() {
 		log.Fatalf("Failed to create log directory: %v", err)
 	}
 
-	var err error
-	accessLogFile, err = os.OpenFile(config.logDir, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		log.Fatalf("Failed to open access log file: %v", err)
+	// 使用 lumberjack.Logger 支持日志回滚和压缩
+	accessLogWriter = &lumberjack.Logger{
+		Filename:   config.logDir,
+		MaxSize:    100,  // 每个日志文件最大 100MB
+		MaxAge:     3,    // 日志保留 3 天
+		MaxBackups: 500,  // 最多保留 10 个备份文件
+		Compress:   true, // 压缩旧日志
+		LocalTime:  true, // 使用本地时间
 	}
 }
 
 // closeAccessLog 关闭访问日志
 func closeAccessLog() {
-	if accessLogFile != nil {
-		accessLogFile.Close()
+	if accessLogWriter != nil {
+		if closer, ok := accessLogWriter.(io.Closer); ok {
+			closer.Close()
+		}
 	}
 }
 
 // logAccess 记录访问日志
-func logAccess(requestID string, r *http.Request, w http.ResponseWriter, startTime time.Time, total int, err error) {
+func logAccess(requestID string, r *http.Request, w http.ResponseWriter, startTime time.Time, total int, statusCode int, err error) {
 	if config.logDir == "" {
 		return
 	}
@@ -69,6 +79,7 @@ func logAccess(requestID string, r *http.Request, w http.ResponseWriter, startTi
 		RequestStartTime: startTime.UnixMilli(),
 		RequestLogTime:   time.Now().UnixMilli(),
 		TotalSent:        total,
+		StatusCode:       statusCode,
 		Error:            "",
 	}
 
@@ -108,10 +119,13 @@ func logAccess(requestID string, r *http.Request, w http.ResponseWriter, startTi
 	// 写入日志
 	accessLogMutex.Lock()
 	defer accessLogMutex.Unlock()
-	if accessLogFile != nil {
-		accessLogFile.Write(logBytes)
-		accessLogFile.WriteString("\n")
-		accessLogFile.Sync()
+	if accessLogWriter != nil {
+		accessLogWriter.Write(logBytes)
+		accessLogWriter.Write([]byte("\n"))
+		// 对于 lumberjack.Logger，Sync() 不是必需的，但如果是文件，我们可以尝试调用
+		if syncWriter, ok := accessLogWriter.(interface{ Sync() error }); ok {
+			syncWriter.Sync()
+		}
 	}
 }
 
@@ -269,7 +283,13 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 		// 打印响应头
 		logResponseHeaders(w, traceID)
 		// 记录访问日志
-		logAccess(traceID, r, w, startTime, 0, nil)
+		// 获取状态码
+		statusCode := http.StatusOK
+		if wrapper, ok := w.(*responseWriterWrapper); ok {
+			statusCode = wrapper.statusCode
+		}
+
+		logAccess(traceID, r, w, startTime, 0, statusCode, nil)
 		return
 	}
 
@@ -305,7 +325,13 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 	// 打印响应头
 	logResponseHeaders(w, traceID)
 	// 记录访问日志
-	logAccess(traceID, r, w, startTime, 0, nil)
+	// 获取状态码
+	statusCode := http.StatusOK
+	if wrapper, ok := w.(*responseWriterWrapper); ok {
+		statusCode = wrapper.statusCode
+	}
+
+	logAccess(traceID, r, w, startTime, 0, statusCode, nil)
 
 	bodyCompleteTime := time.Now()
 	fmt.Printf("预压缩 Range 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Encoding: %s, Start: %s, BodyComplete: %s\n",
@@ -368,7 +394,13 @@ func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, respons
 	// 打印响应头
 	logResponseHeaders(w, traceID)
 	// 记录访问日志
-	logAccess(traceID, r, w, startTime, total, err)
+	// 获取状态码
+	statusCode := http.StatusOK
+	if wrapper, ok := w.(*responseWriterWrapper); ok {
+		statusCode = wrapper.statusCode
+	}
+
+	logAccess(traceID, r, w, startTime, total, statusCode, err)
 
 	bodyCompleteTime := time.Now()
 	fmt.Printf("预压缩响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Encoding: %s, Start: %s, HeaderSent: %s, BodyComplete: %s, BodyLength: %d, TotalSent: %d, Error: %v\n",
@@ -402,7 +434,13 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 		// 打印响应头
 		logResponseHeaders(w, traceID)
 		// 记录访问日志
-		logAccess(traceID, r, w, startTime, 0, nil)
+		// 获取状态码
+		statusCode := http.StatusOK
+		if wrapper, ok := w.(*responseWriterWrapper); ok {
+			statusCode = wrapper.statusCode
+		}
+
+		logAccess(traceID, r, w, startTime, 0, statusCode, nil)
 		return
 	}
 
@@ -440,7 +478,13 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 	// 打印响应头
 	logResponseHeaders(w, traceID)
 	// 记录访问日志
-	logAccess(traceID, r, w, startTime, 0, nil)
+	// 获取状态码
+	statusCode := http.StatusOK
+	if wrapper, ok := w.(*responseWriterWrapper); ok {
+		statusCode = wrapper.statusCode
+	}
+
+	logAccess(traceID, r, w, startTime, 0, statusCode, nil)
 
 	bodyCompleteTime := time.Now()
 	fmt.Printf("Range 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Start: %s, BodyComplete: %s\n",
@@ -527,7 +571,13 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 	// 打印响应头
 	logResponseHeaders(w, traceID)
 	// 记录访问日志
-	logAccess(traceID, r, w, startTime, total, err)
+	// 获取状态码
+	statusCode := http.StatusOK
+	if wrapper, ok := w.(*responseWriterWrapper); ok {
+		statusCode = wrapper.statusCode
+	}
+
+	logAccess(traceID, r, w, startTime, total, statusCode, err)
 
 	bodyCompleteTime := time.Now()
 	fmt.Printf("响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Start: %s, HeaderSent: %s, BodyComplete: %s,BodyLength: %d, TotalSent: %d, Error: %v\n",
@@ -586,7 +636,13 @@ func handle304Response(w http.ResponseWriter, r *http.Request, responseBody []by
 	// 打印响应头
 	logResponseHeaders(w, traceID)
 	// 记录访问日志
-	logAccess(traceID, r, w, startTime, 0, nil)
+	// 获取状态码
+	statusCode := http.StatusOK
+	if wrapper, ok := w.(*responseWriterWrapper); ok {
+		statusCode = wrapper.statusCode
+	}
+
+	logAccess(traceID, r, w, startTime, 0, statusCode, nil)
 
 	fmt.Printf("304 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Start: %s\n",
 		traceID, host, url, method,
@@ -635,7 +691,13 @@ func handleMock302Redirect(w http.ResponseWriter, r *http.Request, locationMapJS
 	w.Header().Set("Location", redirectLocation)
 	w.WriteHeader(http.StatusFound)
 
-	logAccess(traceID, r, w, startTime, 0, nil)
+	// 获取状态码
+	statusCode := http.StatusFound
+	if wrapper, ok := w.(*responseWriterWrapper); ok {
+		statusCode = wrapper.statusCode
+	}
+
+	logAccess(traceID, r, w, startTime, 0, statusCode, nil)
 
 	fmt.Printf("Mock 302 重定向 - Trace-ID: %s, RequestURL: %s, Location: %s, Method: %s, Host: %s, Start: %s\n",
 		traceID, requestURL, redirectLocation, method, host,
@@ -743,7 +805,12 @@ func handleMockResponse(w http.ResponseWriter, r *http.Request, responseBody []b
 	}
 
 	logResponseHeaders(w, traceID)
-	logAccess(traceID, r, w, startTime, total, err)
+	// 获取状态码
+	if wrapper, ok := w.(*responseWriterWrapper); ok {
+		statusCode = wrapper.statusCode
+	}
+
+	logAccess(traceID, r, w, startTime, total, statusCode, err)
 
 	fmt.Printf("Mock 响应完成 - Status: %d, Trace-ID: %s, URL: %s, Method: %s, Host: %s, Start: %s, TotalSent: %d, Error: %v\n",
 		statusCode, traceID, url, method, host,
@@ -822,7 +889,13 @@ func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []b
 	// 打印响应头
 	logResponseHeaders(w, traceID)
 	// 记录访问日志
-	logAccess(traceID, r, w, startTime, 0, nil)
+	// 获取状态码
+	statusCode := http.StatusOK
+	if wrapper, ok := w.(*responseWriterWrapper); ok {
+		statusCode = wrapper.statusCode
+	}
+
+	logAccess(traceID, r, w, startTime, 0, statusCode, nil)
 
 	bodyCompleteTime := time.Now()
 	fmt.Printf("HEAD 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Content-Length: %d, Start: %s, HeaderSent: %s, BodyComplete: %s\n",

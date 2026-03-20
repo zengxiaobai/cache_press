@@ -227,6 +227,17 @@ func genRespBody(responseSize int) ([]byte, string) {
 	return responseBody, etag
 }
 
+// responseWriterWrapper 包装 http.ResponseWriter 以捕获状态码
+type responseWriterWrapper struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (w *responseWriterWrapper) WriteHeader(statusCode int) {
+	w.statusCode = statusCode
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
 func serverHandler(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 	serveHeaderWithDelay()
@@ -235,6 +246,12 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 	method := r.Method
 	host := r.Host
 	url := r.URL.String()
+
+	// 包装 ResponseWriter 以捕获状态码
+	wrapper := &responseWriterWrapper{
+		ResponseWriter: w,
+		statusCode:     http.StatusOK, // 默认状态码
+	}
 
 	responseSize := serverGetRespSize(r)
 	responseBody, etag := genRespBody(responseSize)
@@ -251,7 +268,7 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 处理 X-Mock-302-Location-Map 请求头 - 返回 302 重定向
 	if locationMap := r.Header.Get("X-Mock-302-Location-Map"); locationMap != "" {
-		handled := handleMock302Redirect(w, r, locationMap, traceID, method, host, url, startTime)
+		handled := handleMock302Redirect(wrapper, r, locationMap, traceID, method, host, url, startTime)
 		if handled {
 			return
 		}
@@ -259,30 +276,30 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 处理 X-Mock-Resp-Code 请求头 - 返回自定义状态码响应
 	if mockRespCode := r.Header.Get("X-Mock-Resp-Code"); mockRespCode != "" {
-		handleMockResponse(w, r, responseBody, encoding, etag, traceID, method, host, url, startTime, mockRespCode)
+		handleMockResponse(wrapper, r, responseBody, encoding, etag, traceID, method, host, url, startTime, mockRespCode)
 		return
 	}
 
 	if method == "HEAD" {
-		handleHeadResponse(w, r, responseBody, encoding, etag, traceID, method, host, url, startTime)
+		handleHeadResponse(wrapper, r, responseBody, encoding, etag, traceID, method, host, url, startTime)
 		return
 	}
 
 	if config.preCompress && encoding != "" {
 		if r.Header.Get("Range") != "" {
-			handlePreCompressedRange(w, r, responseBody, encoding, etag, traceID, method, host, url, startTime)
+			handlePreCompressedRange(wrapper, r, responseBody, encoding, etag, traceID, method, host, url, startTime)
 		} else {
-			handlePreCompressedResponse(w, r, responseBody, encoding, etag, traceID, method, host, url, startTime)
+			handlePreCompressedResponse(wrapper, r, responseBody, encoding, etag, traceID, method, host, url, startTime)
 		}
 		return
 	}
 
 	if r.Header.Get("Range") != "" {
-		handleRangeRequest(w, r, responseBody, etag, traceID, method, host, url, startTime)
+		handleRangeRequest(wrapper, r, responseBody, etag, traceID, method, host, url, startTime)
 		return
 	}
 
-	handleNormalResponse(w, r, responseBody, encoding, etag, traceID, method, host, url, startTime)
+	handleNormalResponse(wrapper, r, responseBody, encoding, etag, traceID, method, host, url, startTime)
 }
 
 func startServer() {

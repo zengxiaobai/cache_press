@@ -219,7 +219,7 @@ func init() {
 	flag.StringVar(&config.rangeStr, "range", "", "启用 Range 请求 (仅客户端模式)，格式: -range \"[0-2048,2049-5000]\"")
 	flag.BoolVar(&config.rangeRandom, "range-random", false, "在每个 range 上下限之间随机 (仅客户端模式)")
 	flag.StringVar(&config.ReqIDHdrName, "req-id-hdr-name", "X-WYCDN-Request-ID", "请求ID头名称")
-	flag.StringVar(&config.logDir, "log-dir", "", "访问日志文件路径")
+	flag.StringVar(&config.logDir, "log-dir", "/tmp/cache_press/cache_press.access_log", "访问日志文件路径")
 	flag.StringVar(&config.listenIP, "listen-ip", "", "服务器监听IP (默认: 所有网卡)")
 	flag.BoolVar(&config.cacheResp, "cache-resp", true, "启用响应体缓存 (仅服务器模式)")
 	flag.BoolVar(&config.etag, "etag", false, "是否根据响应内容生成 etag 头 (仅服务器模式)")
