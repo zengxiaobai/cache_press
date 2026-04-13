@@ -12,13 +12,17 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	mrand "math/rand"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -97,6 +101,95 @@ func generateSelfSignedCert(certFile, keyFile, domain string) error {
 	}
 
 	fmt.Printf("自签证书已生成: %s, %s\n", certFile, keyFile)
+	return nil
+}
+
+// parseFileSize 从文件名中解析文件大小
+// 支持格式: /path/to/20GB, /path/to/100MB 等
+func parseFileSize(filePath string) (int64, error) {
+	// 获取文件名
+	filename := filepath.Base(filePath)
+
+	// 匹配数字+单位的模式
+	re := regexp.MustCompile(`(\d+)([GMK]B?)`)
+	matches := re.FindStringSubmatch(filename)
+
+	if len(matches) != 3 {
+		return 0, fmt.Errorf("无效的文件名格式，无法解析大小: %s", filename)
+	}
+
+	// 解析数字部分
+	sizeStr := matches[1]
+	size, err := strconv.ParseInt(sizeStr, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("解析文件大小失败: %w", err)
+	}
+
+	// 解析单位部分
+	unit := strings.ToUpper(matches[2])
+	switch unit {
+	case "GB", "G":
+		size *= 1024 * 1024 * 1024
+	case "MB", "M":
+		size *= 1024 * 1024
+	case "KB", "K":
+		size *= 1024
+	default:
+		return 0, fmt.Errorf("不支持的单位: %s", unit)
+	}
+
+	return size, nil
+}
+
+// generateFile 生成指定大小的文件
+func generateFile(filePath string, size int64) error {
+	// 确保目录存在
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("创建目录失败: %w", err)
+	}
+
+	// 创建文件
+	f, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("创建文件失败: %w", err)
+	}
+	defer f.Close()
+
+	// 生成文件内容
+	// 使用 1MB 的缓冲区
+	bufferSize := int64(1024 * 1024)
+	buffer := make([]byte, bufferSize)
+
+	// 填充缓冲区
+	for i := range buffer {
+		buffer[i] = 'x'
+	}
+
+	// 写入文件
+	written := int64(0)
+	for written < size {
+		// 计算本次写入的大小
+		writeSize := bufferSize
+		if written+writeSize > size {
+			writeSize = size - written
+		}
+
+		// 写入数据
+		n, err := f.Write(buffer[:writeSize])
+		if err != nil {
+			return fmt.Errorf("写入文件失败: %w", err)
+		}
+
+		written += int64(n)
+	}
+
+	// 确保文件大小正确
+	if err := f.Truncate(size); err != nil {
+		return fmt.Errorf("截断文件失败: %w", err)
+	}
+
+	fmt.Printf("文件已生成: %s, 大小: %d 字节\n", filePath, size)
 	return nil
 }
 
@@ -247,6 +340,95 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 	host := r.Host
 	url := r.URL.String()
 
+	// 处理 X-Req-Local-File 请求头
+	if localFilePath := r.Header.Get("X-Req-Local-File"); localFilePath != "" {
+		// 包装 ResponseWriter 以捕获状态码
+		wrapper := &responseWriterWrapper{
+			ResponseWriter: w,
+			statusCode:     http.StatusOK, // 默认状态码
+		}
+
+		// 检查文件是否存在
+		if _, err := os.Stat(localFilePath); os.IsNotExist(err) {
+			http.Error(wrapper, fmt.Sprintf("文件不存在: %s", localFilePath), http.StatusNotFound)
+			logAccess(traceID, r, wrapper, startTime, 0, wrapper.statusCode, nil)
+			return
+		}
+
+		// 打开文件
+		file, err := os.Open(localFilePath)
+		if err != nil {
+			http.Error(wrapper, fmt.Sprintf("打开文件失败: %v", err), http.StatusInternalServerError)
+			logAccess(traceID, r, wrapper, startTime, 0, wrapper.statusCode, err)
+			return
+		}
+		defer file.Close()
+
+		// 获取文件信息
+		fileInfo, err := file.Stat()
+		if err != nil {
+			http.Error(wrapper, fmt.Sprintf("获取文件信息失败: %v", err), http.StatusInternalServerError)
+			logAccess(traceID, r, wrapper, startTime, 0, wrapper.statusCode, err)
+			return
+		}
+
+		// 设置响应头
+		wrapper.Header().Set("Content-Type", "application/octet-stream")
+		wrapper.Header().Set("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
+		wrapper.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filepath.Base(localFilePath)))
+
+		// 检查是否使用 chunked 传输
+		if chunkedHeader := r.Header.Get("X-Use-Chunked-Transfer"); chunkedHeader != "" {
+			if chunkedHeader == "true" || chunkedHeader == "1" {
+				wrapper.Header().Set("Transfer-Encoding", "chunked")
+				wrapper.Header().Del("Content-Length")
+			} else if chunkedHeader == "false" || chunkedHeader == "0" {
+				// 确保使用 Content-Length
+				wrapper.Header().Del("Transfer-Encoding")
+				wrapper.Header().Set("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
+			}
+		} else if config.useChunkedTransfer {
+			// 使用配置的 chunked 传输
+			wrapper.Header().Set("Transfer-Encoding", "chunked")
+			wrapper.Header().Del("Content-Length")
+		}
+
+		// 发送响应头
+		wrapper.WriteHeader(http.StatusOK)
+
+		// 发送文件内容
+		if config.sendBytesPerInterval > 0 && config.sendIntervalMs > 0 {
+			// 限速发送
+			buffer := make([]byte, config.sendBytesPerInterval)
+			for {
+				n, err := file.Read(buffer)
+				if n > 0 {
+					wrapper.Write(buffer[:n])
+					time.Sleep(time.Duration(config.sendIntervalMs) * time.Millisecond)
+				}
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					http.Error(wrapper, fmt.Sprintf("读取文件失败: %v", err), http.StatusInternalServerError)
+					logAccess(traceID, r, wrapper, startTime, 0, wrapper.statusCode, err)
+					return
+				}
+			}
+		} else {
+			// 直接发送文件
+			if _, err := io.Copy(wrapper, file); err != nil {
+				http.Error(wrapper, fmt.Sprintf("发送文件失败: %v", err), http.StatusInternalServerError)
+				logAccess(traceID, r, wrapper, startTime, 0, wrapper.statusCode, err)
+				return
+			}
+		}
+
+		// 记录访问日志
+		logAccess(traceID, r, wrapper, startTime, 0, wrapper.statusCode, nil)
+		return
+	}
+
 	// 包装 ResponseWriter 以捕获状态码
 	wrapper := &responseWriterWrapper{
 		ResponseWriter: w,
@@ -315,6 +497,17 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 func startServer() {
 	initAccessLog()
 	defer closeAccessLog()
+
+	// 处理本地文件生成
+	if config.localFile != "" {
+		size, err := parseFileSize(config.localFile)
+		if err != nil {
+			log.Fatalf("解析文件大小失败: %v", err)
+		}
+		if err := generateFile(config.localFile, size); err != nil {
+			log.Fatalf("生成文件失败: %v", err)
+		}
+	}
 
 	// 处理自签证书生成
 	if config.generateCert != "" {

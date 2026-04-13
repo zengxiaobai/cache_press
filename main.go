@@ -109,8 +109,11 @@ type Config struct {
 	respHeaders          []string // 解析后的响应头列表 (仅服务器模式)
 	cmdRespHeaders       []string // 命令行指定的响应头列表 (仅服务器模式)
 	useChunkedTransfer   bool     // 是否使用 chunked 传输 (默认 false，使用 Content-Length)
-	vary                 string   // Vary 头配置字符串，格式: "[\"Accept-Encoding\",\"User-Agent\"]"
+	vary                 string   // Vary 头配置字符串，格式: "["Accept-Encoding","User-Agent"]"
 	varyHeaders          []string // 解析后的 Vary 头列表
+
+	// 本地文件配置 - 仅服务器使用
+	localFile string // 启动时生成的本地文件路径
 
 	// 连接池配置 - 仅客户端使用
 	maxIdleConns        int
@@ -262,6 +265,7 @@ func init() {
 	flag.StringVar(&config.respHeaderFile, "resp-header-file", "", "响应头文件路径 (仅服务器模式，格式: 每行一个头和值，头跟值中间用空格分开)")
 	flag.BoolVar(&config.useChunkedTransfer, "use-chunked-transfer", false, "是否使用 chunked 传输 (仅服务器模式，默认 false 使用 Content-Length)")
 	flag.StringVar(&config.vary, "vary", "", "Vary 响应头配置 (仅服务器模式，格式: [\"header1\",\"header2\"])")
+	flag.StringVar(&config.localFile, "local-file", "", "启动时生成的本地文件路径 (仅服务器模式，格式: /path/to/file，大小从文件名推断，如 /tmp/20GB)")
 
 	// 客户端主动断开连接控制
 	flag.Float64Var(&config.clientSendCloseProb, "client-send-close-prob", 0.0, "发送完请求后主动断开连接的概率 (0.0-1.0)")
