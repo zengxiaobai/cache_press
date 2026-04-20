@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"cache_press/pkg/buffer"
 	"crypto/md5"
 	"crypto/rand"
@@ -218,6 +217,140 @@ func serveHeaderWithDelay() {
 		}
 		time.Sleep(time.Duration(delay) * time.Millisecond)
 	}
+}
+
+// acceptItem 表示 Accept-Encoding / Accept-Language 中的一个条目
+type acceptItem struct {
+	value string
+	q     float64
+}
+
+// negotiateEncoding 解析 Accept-Encoding 头并选择服务器支持的最佳编码
+// 支持带 q 值的场景（如 "gzip;q=1.0, br;q=0.5"）和多编码逗号分隔的场景（如 "gzip, br"）
+// 按服务器偏好优先级遍历，选择客户端 q 值最高的编码
+// q=0 表示不接受该编码，* 表示接受任意编码
+func negotiateEncoding(ae string) string {
+	if ae == "" {
+		return ""
+	}
+
+	// 服务器支持的编码，按优先级排序（br 优先于 gzip）
+	serverSupported := []string{"br", "gzip"}
+
+	// 解析 Accept-Encoding 头
+	items := parseAcceptList(ae)
+
+	// 构建 q 值映射：编码 -> 最高 q 值
+	qMap := make(map[string]float64)
+	var wildcardQ float64 = -1 // -1 表示没有通配符
+	for _, item := range items {
+		key := strings.ToLower(item.value)
+		if key == "*" {
+			wildcardQ = item.q
+			continue
+		}
+		// 取同一编码的最高 q 值
+		if existing, ok := qMap[key]; !ok || item.q > existing {
+			qMap[key] = item.q
+		}
+	}
+
+	// 在客户端可接受的编码中（q > 0），按服务器偏好优先级选择
+	var bestEncoding string
+	var bestQ float64 = -1
+
+	for _, supported := range serverSupported {
+		q, ok := qMap[supported]
+		if !ok {
+			// 客户端未明确指定此编码，检查通配符
+			if wildcardQ > 0 {
+				q = wildcardQ
+			} else {
+				continue
+			}
+		}
+		if q <= 0 {
+			// 客户端明确拒绝此编码（q=0）
+			continue
+		}
+		if q > bestQ {
+			bestQ = q
+			bestEncoding = supported
+		}
+	}
+
+	return bestEncoding
+}
+
+// negotiateLanguage 解析 Accept-Language 头并选择 q 值最高的语言
+// 不需要服务器配置语言列表，直接使用客户端携带的语言
+// 支持带 q 值的场景（如 "zh-CN;q=1.0, en;q=0.5"）和多语言逗号分隔的场景（如 "zh-CN, en"）
+// 返回客户端 q 值最高且 q > 0 的语言，q=0 表示不接受该语言
+func negotiateLanguage(al string) string {
+	if al == "" {
+		return ""
+	}
+
+	// 解析 Accept-Language 头
+	items := parseAcceptList(al)
+
+	// 选择 q 值最高且 q > 0 的语言
+	var bestLang string
+	var bestQ float64 = -1
+
+	for _, item := range items {
+		if item.q <= 0 || item.value == "*" {
+			continue
+		}
+		if item.q > bestQ {
+			bestQ = item.q
+			bestLang = item.value
+		}
+	}
+
+	return bestLang
+}
+
+// parseAcceptList 解析 Accept-Encoding / Accept-Language 头值
+// 格式示例:
+//
+//	"gzip"
+//	"gzip, br"
+//	"gzip;q=1.0, br;q=0.5"
+//	"zh-CN;q=1.0, en;q=0.5"
+//	"*;q=0, br"
+func parseAcceptList(headerValue string) []acceptItem {
+	var items []acceptItem
+
+	// 按逗号分割各个条目
+	parts := strings.Split(headerValue, ",")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		// 按分号分割值和参数
+		segments := strings.Split(part, ";")
+		value := strings.TrimSpace(segments[0])
+
+		// 默认 q 值为 1.0
+		q := 1.0
+
+		// 解析参数（如 q=0.5）
+		for _, seg := range segments[1:] {
+			seg = strings.TrimSpace(seg)
+			if strings.HasPrefix(strings.ToLower(seg), "q=") {
+				if val, err := strconv.ParseFloat(seg[2:], 64); err == nil {
+					q = val
+				}
+			}
+		}
+
+		items = append(items, acceptItem{value: value, q: q})
+	}
+
+	return items
 }
 
 func serveBodyWithDelay() {
@@ -455,18 +588,14 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ae := r.Header.Get("Accept-Encoding")
-	var encoding string
-	if ae != "" {
-		if bytes.Contains([]byte(ae), []byte("br")) {
-			encoding = "br"
-		} else if bytes.Contains([]byte(ae), []byte("gzip")) {
-			encoding = "gzip"
-		}
-	}
+	encoding := negotiateEncoding(ae)
+
+	al := r.Header.Get("Accept-Language")
+	language := negotiateLanguage(al)
 
 	// 处理 X-Mock-302-Location-Map 请求头 - 返回 302 重定向
 	if locationMap := r.Header.Get("X-Mock-302-Location-Map"); locationMap != "" {
-		handled := handleMock302Redirect(wrapper, r, locationMap, traceID, method, host, url, startTime)
+		handled := handleMock302Redirect(wrapper, r, locationMap, language, traceID, method, host, url, startTime)
 		if handled {
 			return
 		}
@@ -474,30 +603,30 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 处理 X-Mock-Resp-Code 请求头 - 返回自定义状态码响应
 	if mockRespCode := r.Header.Get("X-Mock-Resp-Code"); mockRespCode != "" {
-		handleMockResponse(wrapper, r, responseBody, encoding, etag, traceID, method, host, url, startTime, mockRespCode)
+		handleMockResponse(wrapper, r, responseBody, encoding, language, etag, traceID, method, host, url, startTime, mockRespCode)
 		return
 	}
 
 	if method == "HEAD" {
-		handleHeadResponse(wrapper, r, responseBody, encoding, etag, traceID, method, host, url, startTime)
+		handleHeadResponse(wrapper, r, responseBody, encoding, language, etag, traceID, method, host, url, startTime)
 		return
 	}
 
 	if config.preCompress && encoding != "" {
 		if r.Header.Get("Range") != "" {
-			handlePreCompressedRange(wrapper, r, responseBody, encoding, etag, traceID, method, host, url, startTime)
+			handlePreCompressedRange(wrapper, r, responseBody, encoding, language, etag, traceID, method, host, url, startTime)
 		} else {
-			handlePreCompressedResponse(wrapper, r, responseBody, encoding, etag, traceID, method, host, url, startTime)
+			handlePreCompressedResponse(wrapper, r, responseBody, encoding, language, etag, traceID, method, host, url, startTime)
 		}
 		return
 	}
 
 	if r.Header.Get("Range") != "" {
-		handleRangeRequest(wrapper, r, responseBody, etag, traceID, method, host, url, startTime)
+		handleRangeRequest(wrapper, r, responseBody, language, etag, traceID, method, host, url, startTime)
 		return
 	}
 
-	handleNormalResponse(wrapper, r, responseBody, encoding, etag, useChunked, traceID, method, host, url, startTime)
+	handleNormalResponse(wrapper, r, responseBody, encoding, language, etag, useChunked, traceID, method, host, url, startTime)
 }
 
 func startServer() {

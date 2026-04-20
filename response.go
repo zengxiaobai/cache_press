@@ -259,7 +259,7 @@ func addRequestHeadersToResponse(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, etag string, traceID, method, host, url string, startTime time.Time) {
+func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, language string, etag string, traceID, method, host, url string, startTime time.Time) {
 	compressedBody := getPreCompressedBody(responseBody, encoding)
 	contentType := "application/octet-stream"
 
@@ -309,12 +309,9 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 	addRequestHeadersToResponse(w, r)
 
 	w.Header().Set("Content-Encoding", encoding)
+	setContentLanguageHeader(w, language)
 	// 设置 Vary 头
-	if len(config.varyHeaders) > 0 {
-		w.Header().Set("Vary", strings.Join(config.varyHeaders, ", "))
-	} else if encoding != "" {
-		w.Header().Set("Vary", "Accept-Encoding")
-	}
+	setVaryHeaders(w, encoding, language)
 
 	if len(ranges) == 1 {
 		handleSingleRange(w, ranges[0], compressedBody, contentType, md5Sum)
@@ -340,7 +337,7 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 		bodyCompleteTime.Format("2006-01-02 15:04:05.000"))
 }
 
-func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, etag string, traceID, method, host, url string, startTime time.Time) {
+func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, language string, etag string, traceID, method, host, url string, startTime time.Time) {
 	compressedBody := getPreCompressedBody(responseBody, encoding)
 	contentType := "application/octet-stream"
 
@@ -358,12 +355,9 @@ func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, respons
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Encoding", encoding)
+	setContentLanguageHeader(w, language)
 	// 设置 Vary 头
-	if len(config.varyHeaders) > 0 {
-		w.Header().Set("Vary", strings.Join(config.varyHeaders, ", "))
-	} else if encoding != "" {
-		w.Header().Set("Vary", "Accept-Encoding")
-	}
+	setVaryHeaders(w, encoding, language)
 
 	if !config.useChunkedTransfer {
 		w.Header().Set("Content-Length", strconv.Itoa(len(compressedBody)))
@@ -411,7 +405,7 @@ func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, respons
 		len(compressedBody), total, err)
 }
 
-func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []byte, etag string, traceID, method, host, url string, startTime time.Time) {
+func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []byte, language string, etag string, traceID, method, host, url string, startTime time.Time) {
 	contentType := "application/octet-stream"
 
 	// 打印请求头
@@ -460,9 +454,7 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 	addRequestHeadersToResponse(w, r)
 
 	// 设置 Vary 头
-	if len(config.varyHeaders) > 0 {
-		w.Header().Set("Vary", strings.Join(config.varyHeaders, ", "))
-	}
+	setVaryHeaders(w, "", language)
 	bodyStartTime := time.Now()
 	fmt.Printf("Range 响应开始 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Start: %s, BodyComplete: %s\n",
 		traceID, host, url, method, ranges,
@@ -493,7 +485,7 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 		bodyCompleteTime.Format("2006-01-02 15:04:05.000"))
 }
 
-func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, etag string, useChunked bool, traceID, method, host, url string, startTime time.Time) {
+func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, language string, etag string, useChunked bool, traceID, method, host, url string, startTime time.Time) {
 	contentType := "application/octet-stream"
 	var requestURL string
 
@@ -517,15 +509,12 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 	w.Header().Set("X-Debug-Req-Url", requestURL)
 
 	// 设置 Vary 头
-	if len(config.varyHeaders) > 0 {
-		w.Header().Set("Vary", strings.Join(config.varyHeaders, ", "))
-	} else if encoding != "" {
-		w.Header().Set("Vary", "Accept-Encoding")
-	}
+	setVaryHeaders(w, encoding, language)
 
 	if encoding != "" {
 		w.Header().Set("Content-Encoding", encoding)
 	}
+	setContentLanguageHeader(w, language)
 
 	if config.enableHash {
 		md5Sum := calculateMD5(responseBody)
@@ -598,7 +587,7 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 		len(responseBody), total, err)
 }
 
-func handle304Response(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, traceID, method, host, url string, startTime time.Time) {
+func handle304Response(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, language string, traceID, method, host, url string, startTime time.Time) {
 	contentType := "application/octet-stream"
 	var requestURL string
 
@@ -622,15 +611,12 @@ func handle304Response(w http.ResponseWriter, r *http.Request, responseBody []by
 	w.Header().Set("X-Debug-Req-Url", requestURL)
 
 	// 设置 Vary 头
-	if len(config.varyHeaders) > 0 {
-		w.Header().Set("Vary", strings.Join(config.varyHeaders, ", "))
-	} else if encoding != "" {
-		w.Header().Set("Vary", "Accept-Encoding")
-	}
+	setVaryHeaders(w, encoding, language)
 
 	if encoding != "" {
 		w.Header().Set("Content-Encoding", encoding)
 	}
+	setContentLanguageHeader(w, language)
 
 	if config.enableHash {
 		md5Sum := calculateMD5(responseBody)
@@ -664,7 +650,7 @@ type mockLocationMap struct {
 	Location string `json:"location"`
 }
 
-func handleMock302Redirect(w http.ResponseWriter, r *http.Request, locationMapJSON, traceID, method, host, url string, startTime time.Time) bool {
+func handleMock302Redirect(w http.ResponseWriter, r *http.Request, locationMapJSON, language, traceID, method, host, url string, startTime time.Time) bool {
 	var locationMaps []mockLocationMap
 	if err := json.Unmarshal([]byte(locationMapJSON), &locationMaps); err != nil {
 		fmt.Printf("无效的 X-Mock-302-Location-Map JSON 格式: %s, 错误: %v\n", locationMapJSON, err)
@@ -740,7 +726,7 @@ func buildRequestURL(r *http.Request, host, url string) string {
 	return requestURL
 }
 
-func handleMockResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, etag string, traceID, method, host, url string, startTime time.Time, mockRespCode string) {
+func handleMockResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, language string, etag string, traceID, method, host, url string, startTime time.Time, mockRespCode string) {
 	// 解析状态码
 	statusCode, err := strconv.Atoi(mockRespCode)
 	var requestURL string
@@ -768,15 +754,12 @@ func handleMockResponse(w http.ResponseWriter, r *http.Request, responseBody []b
 	// 添加 X-Resp-Add-Header 请求头中的响应头（优先级更高，可覆盖）
 	addXRespAddHeaders(w, r)
 
-	if len(config.varyHeaders) > 0 {
-		w.Header().Set("Vary", strings.Join(config.varyHeaders, ", "))
-	} else if encoding != "" {
-		w.Header().Set("Vary", "Accept-Encoding")
-	}
+	setVaryHeaders(w, encoding, language)
 
 	if encoding != "" {
 		w.Header().Set("Content-Encoding", encoding)
 	}
+	setContentLanguageHeader(w, language)
 
 	if config.enableHash {
 		md5Sum := calculateMD5(responseBody)
@@ -835,6 +818,32 @@ func setConnectionHeader(w http.ResponseWriter) {
 	}
 }
 
+// setContentLanguageHeader 设置 Content-Language 响应头
+func setContentLanguageHeader(w http.ResponseWriter, language string) {
+	if language != "" {
+		w.Header().Set("Content-Language", language)
+	}
+}
+
+// setVaryHeaders 设置 Vary 响应头，综合考虑 encoding、language 和配置的 varyHeaders
+func setVaryHeaders(w http.ResponseWriter, encoding string, language string) {
+	if len(config.varyHeaders) > 0 {
+		w.Header().Set("Vary", strings.Join(config.varyHeaders, ", "))
+		return
+	}
+	// 自动根据 encoding 和 language 推断 Vary
+	var varyItems []string
+	if encoding != "" {
+		varyItems = append(varyItems, "Accept-Encoding")
+	}
+	if language != "" {
+		varyItems = append(varyItems, "Accept-Language")
+	}
+	if len(varyItems) > 0 {
+		w.Header().Set("Vary", strings.Join(varyItems, ", "))
+	}
+}
+
 func closeConnectionIfNeeded(w http.ResponseWriter) {
 	if config.closeConnAfterBodyProb > 0 && rand.Float64() <= config.closeConnAfterBodyProb {
 		if hj, ok := w.(http.Hijacker); ok {
@@ -846,7 +855,7 @@ func closeConnectionIfNeeded(w http.ResponseWriter) {
 	}
 }
 
-func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, etag string, traceID, method, host, url string, startTime time.Time) {
+func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, language string, etag string, traceID, method, host, url string, startTime time.Time) {
 	contentType := "application/octet-stream"
 	var requestURL string
 
@@ -870,15 +879,12 @@ func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []b
 	w.Header().Set("X-Debug-Req-Url", requestURL)
 
 	// 设置 Vary 头
-	if len(config.varyHeaders) > 0 {
-		w.Header().Set("Vary", strings.Join(config.varyHeaders, ", "))
-	} else if encoding != "" {
-		w.Header().Set("Vary", "Accept-Encoding")
-	}
+	setVaryHeaders(w, encoding, language)
 
 	if encoding != "" {
 		w.Header().Set("Content-Encoding", encoding)
 	}
+	setContentLanguageHeader(w, language)
 
 	if config.enableHash {
 		md5Sum := calculateMD5(responseBody)
