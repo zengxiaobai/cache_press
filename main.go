@@ -112,6 +112,10 @@ type Config struct {
 	vary                 string   // Vary 头配置字符串，格式: "["Accept-Encoding","User-Agent"]"
 	varyHeaders          []string // 解析后的 Vary 头列表
 
+	// 删除请求头配置 - 仅服务器使用
+	delReqHdrStr string   // 删除请求头配置字符串，格式: "["hdr1","hdr2"]"
+	delReqHdrs   []string // 解析后的删除请求头列表
+
 	// 本地文件配置 - 仅服务器使用
 	localFile string // 启动时生成的本地文件路径
 
@@ -265,6 +269,7 @@ func init() {
 	flag.StringVar(&config.respHeaderFile, "resp-header-file", "", "响应头文件路径 (仅服务器模式，格式: 每行一个头和值，头跟值中间用空格分开)")
 	flag.BoolVar(&config.useChunkedTransfer, "use-chunked-transfer", false, "是否使用 chunked 传输 (仅服务器模式，默认 false 使用 Content-Length)")
 	flag.StringVar(&config.vary, "vary", "", "Vary 响应头配置 (仅服务器模式，格式: [\"header1\",\"header2\"])")
+	flag.StringVar(&config.delReqHdrStr, "del-req-hdr", "", "强制删除请求头配置 (仅服务器模式，格式: [\"header1\",\"header2\"])")
 	flag.StringVar(&config.localFile, "local-file", "", "启动时生成的本地文件路径 (仅服务器模式，格式: /path/to/file，大小从文件名推断，如 /tmp/20GB)")
 
 	// 客户端主动断开连接控制
@@ -628,6 +633,9 @@ func main() {
 
 	// 解析服务端 Vary 头配置
 	config.varyHeaders = parseVary(config.vary)
+
+	// 解析服务端删除请求头配置
+	config.delReqHdrs = parseVary(config.delReqHdrStr)
 
 	// 解析响应头文件
 	respHeaders, err := parseRespHeaderFile(config.respHeaderFile)

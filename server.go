@@ -333,6 +333,12 @@ func (w *responseWriterWrapper) WriteHeader(statusCode int) {
 
 func serverHandler(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
+
+	// 删除配置中指定的请求头
+	for _, hdr := range config.delReqHdrs {
+		r.Header.Del(hdr)
+	}
+
 	serveHeaderWithDelay()
 
 	traceID := getTraceID(r)
