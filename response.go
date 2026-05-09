@@ -87,12 +87,12 @@ func logAccess(requestID string, r *http.Request, w http.ResponseWriter, startTi
 		entry.Error = err.Error()
 	}
 
-	// 收集请求头
-	if r.Header.Get("Range") != "" {
-		entry.RequestHeaders["Range"] = r.Header.Get("Range")
+	// 收集所有请求头
+	for name, values := range r.Header {
+		entry.RequestHeaders[name] = strings.Join(values, ", ")
 	}
-	if r.Header.Get("Accept-Encoding") != "" {
-		entry.RequestHeaders["Accept-Encoding"] = r.Header.Get("Accept-Encoding")
+	if r.Host != "" {
+		entry.RequestHeaders["Host"] = r.Host
 	}
 
 	// 收集响应头
@@ -313,6 +313,12 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 	// 设置 Vary 头
 	setVaryHeaders(w, encoding, language)
 
+	// 生成 etag 头
+	if config.etag && etag != "" {
+		w.Header().Set("ETag", fmt.Sprintf("\"%s\"", etag))
+		fmt.Printf("预压缩 Range 响应 ETag - Trace-ID: %s, 大小: %d, ETag: %s\n", traceID, len(compressedBody), etag)
+	}
+
 	if len(ranges) == 1 {
 		handleSingleRange(w, ranges[0], compressedBody, contentType, md5Sum)
 	} else {
@@ -455,6 +461,13 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 
 	// 设置 Vary 头
 	setVaryHeaders(w, "", language)
+
+	// 生成 etag 头
+	if config.etag && etag != "" {
+		w.Header().Set("ETag", fmt.Sprintf("\"%s\"", etag))
+		fmt.Printf("Range 响应 ETag - Trace-ID: %s, 大小: %d, ETag: %s\n", traceID, len(responseBody), etag)
+	}
+
 	bodyStartTime := time.Now()
 	fmt.Printf("Range 响应开始 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Start: %s, BodyComplete: %s\n",
 		traceID, host, url, method, ranges,
@@ -587,7 +600,57 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 		len(responseBody), total, err)
 }
 
-func handle304Response(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, language string, traceID, method, host, url string, startTime time.Time) {
+// checkConditionalRequest 检查条件请求头，如果匹配则返回 true（应返回 304）
+// 支持 If-None-Match 和 If-Modified-Since
+func checkConditionalRequest(r *http.Request, etag string, lastModified time.Time) bool {
+	// 检查 If-None-Match（ETag 匹配）
+	if etag != "" {
+		ifNoneMatch := r.Header.Get("If-None-Match")
+		// 如果 If-None-Match 为 "*"，匹配任何 ETag
+		if ifNoneMatch == "*" {
+			return true
+		}
+		// 检查 ETag 是否匹配（支持多个 ETag，用逗号分隔）
+		etagWithQuotes := fmt.Sprintf("\"%s\"", etag)
+		if strings.Contains(ifNoneMatch, etagWithQuotes) || ifNoneMatch == etagWithQuotes {
+			return true
+		}
+	}
+
+	// 检查 If-Modified-Since（时间匹配）
+	if !lastModified.IsZero() {
+		ifModifiedSince := r.Header.Get("If-Modified-Since")
+		if ifModifiedSince != "" {
+			parsedTime, err := time.Parse(time.RFC1123, ifModifiedSince)
+			if err != nil {
+				// 尝试其他格式
+				parsedTime, err = time.Parse("2006-01-02 15:04:05", ifModifiedSince)
+			}
+			if err == nil {
+				// 如果内容自指定时间以来没有被修改，返回 304
+				// 允许 1 秒的误差
+				if lastModified.Before(parsedTime.Add(1 * time.Second)) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// lastModifiedTime 用于生成或解析 Last-Modified 时间
+// 对于 cache_press，使用响应体内容的哈希值来生成确定性的修改时间
+// getLastModified 返回 Last-Modified 时间
+// 当前返回零值（不支持 If-Modified-Since）
+// 如需支持，请手动设置 Last-Modified 头
+func getLastModified(responseBody []byte) time.Time {
+	// 返回零值，表示不支持 Last-Modified
+	// checkConditionalRequest 会跳过 If-Modified-Since 检查
+	return time.Time{}
+}
+
+func handle304Response(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, language string, etag string, lastModified time.Time, traceID, method, host, url string, startTime time.Time) {
 	contentType := "application/octet-stream"
 	var requestURL string
 
@@ -618,14 +681,25 @@ func handle304Response(w http.ResponseWriter, r *http.Request, responseBody []by
 	}
 	setContentLanguageHeader(w, language)
 
+	// 设置 ETag 头（如果可用）
+	if config.etag && etag != "" {
+		w.Header().Set("ETag", fmt.Sprintf("\"%s\"", etag))
+	}
+
+	// 设置 Last-Modified 头（如果可用）
+	if !lastModified.IsZero() {
+		w.Header().Set("Last-Modified", lastModified.Format(time.RFC1123))
+	}
+
 	if config.enableHash {
 		md5Sum := calculateMD5(responseBody)
 		w.Header().Set("X-Content-MD5", md5Sum)
 		fmt.Printf("304 响应 MD5 - Trace-ID: %s, 大小: %d, MD5: %s\n", traceID, len(responseBody), md5Sum)
 	}
 
-	// 304 响应没有响应体，但可以保留 Content-Length 头
-	w.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
+	// 304 响应不应该有 Content-Length 头（根据 HTTP 规范）
+	// 但有些客户端需要它，所以可以保留（值为 0）
+	w.Header().Del("Content-Length")
 
 	w.WriteHeader(http.StatusNotModified)
 

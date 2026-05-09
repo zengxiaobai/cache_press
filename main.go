@@ -123,6 +123,7 @@ type Config struct {
 	maxIdleConns        int
 	maxIdleConnsPerHost int
 	idleConnTimeout     time.Duration
+	clientTimeout       time.Duration // HTTP 客户端超时
 
 	// 客户端主动断开连接控制
 	clientSendCloseProb     float64  // 发送完请求后主动断开连接的概率 (0.0-1.0)
@@ -257,6 +258,7 @@ func init() {
 	flag.IntVar(&config.maxIdleConns, "max-idle-conns", 2000, "最大空闲连接数")
 	flag.IntVar(&config.maxIdleConnsPerHost, "max-idle-conns-per-host", 1000, "每个主机最大空闲连接数")
 	flag.DurationVar(&config.idleConnTimeout, "idle-conn-timeout", 100*time.Second, "空闲连接超时时间")
+	flag.DurationVar(&config.clientTimeout, "client-timeout", 120*time.Second, "HTTP 客户端超时时间 (仅客户端模式)")
 
 	// 持久连接控制 - 仅服务器使用
 	flag.Float64Var(&config.keepAliveProb, "server-keep-alive-prob", 1.0, "Connection头为keep-alive的概率 (0.0-1.0)")
@@ -276,11 +278,35 @@ func init() {
 	flag.Float64Var(&config.clientSendCloseProb, "client-send-close-prob", 0.0, "发送完请求后主动断开连接的概率 (0.0-1.0)")
 	flag.Float64Var(&config.clientRecvHalfCloseProb, "client-recv-half-close-prob", 0.0, "接收响应body一半时主动断开连接的概率 (0.0-1.0)")
 	flag.Float64Var(&config.clientRecvFullCloseProb, "client-recv-full-close-prob", 0.0, "接收完响应后主动断开连接的概率 (0.0-1.0)")
+	flag.StringVar(&config.compareAddr, "compare-addr", "", "Range 请求时用于对比 hash 的地址 (仅客户端模式)")
 	flag.StringVar(&config.addHeaderFile, "req-header-file", "", "自定义请求头文件路径 (仅客户端模式，格式: 每行 header: value)")
 	flag.Func("add-resp-header", "添加响应头 (仅服务器模式，格式: \"Header: Value\"，可多次指定)", func(value string) error {
 		config.cmdRespHeaders = append(config.cmdRespHeaders, value)
 		return nil
 	})
+
+	// 自定义帮助信息，添加请求头控制功能说明
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "用法: %s [选项]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "cache_press 是一个用于测试缓存服务器性能的压测工具，支持客户端和服务器模式。\n\n")
+		fmt.Fprintf(os.Stderr, "选项:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\n请求头控制 (客户端发送的请求头可控制服务器行为):\n")
+		fmt.Fprintf(os.Stderr, "  X-Req-Local-File   从本地文件响应内容 (值为文件路径)\n")
+		fmt.Fprintf(os.Stderr, "  X-Use-Chunked-Transfer   控制是否使用 chunked 传输 (true/1 或 false/0)\n")
+		fmt.Fprintf(os.Stderr, "  X-press-size   控制响应体大小 (值为字节数)\n")
+		fmt.Fprintf(os.Stderr, "  X-Resp-Add-Header   动态添加响应头 (格式: Header: Value，多个用逗号分隔)\n")
+		fmt.Fprintf(os.Stderr, "  X-Mock-304   触发服务器返回 304 Not Modified 响应\n")
+		fmt.Fprintf(os.Stderr, "  X-Mock-302-Location-Map   触发服务器返回 302 重定向 (值为 JSON 映射表)\n")
+		fmt.Fprintf(os.Stderr, "  X-Mock-Resp-Code   模拟自定义响应状态码 (如 403、500 等)\n")
+		fmt.Fprintf(os.Stderr, "\n服务器模式参数:\n")
+		fmt.Fprintf(os.Stderr, "  -local-file   启动时生成指定大小的文件 (大小从文件名推断，如 /tmp/20GB)\n")
+		fmt.Fprintf(os.Stderr, "  -del-req-hdr   强制删除请求头 (格式: [\"hdr1\",\"hdr2\"])\n")
+		fmt.Fprintf(os.Stderr, "\n示例:\n")
+		fmt.Fprintf(os.Stderr, "  启动服务器: %s -mode=server -port=9000\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  启动客户端: %s -mode=client -addr=127.0.0.1:9000 -conns=100 -qps=1000\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  从本地文件响应: curl -H \"X-Req-Local-File: /tmp/test.dat\" http://127.0.0.1:9000/path\n")
+	}
 }
 
 func parseRespSize(respSizeStr string) []int {

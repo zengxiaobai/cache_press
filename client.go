@@ -74,7 +74,7 @@ func runClient() {
 			defer wg.Done()
 
 			client := &http.Client{
-				Timeout:   30 * time.Second,
+				Timeout:   config.clientTimeout,
 				Transport: transport,
 			}
 
@@ -138,20 +138,20 @@ func runClient() {
 
 func compareHash(req *http.Request, resp *http.Response, result responseResult, requestStartTime time.Time) {
 	compareClient := &http.Client{
-		Timeout:   30 * time.Second,
+		Timeout:   config.clientTimeout,
 		Transport: transport,
 	}
 
 	compareURL := *req.URL
 	compareURL.Host = config.compareAddr
-	if config.host != "" {
-		compareURL.Host = config.host
-	}
 
 	compareReq, err := http.NewRequest(req.Method, compareURL.String(), nil)
 	if err != nil {
 		fmt.Printf("创建对比请求失败: %v\n", err)
 		return
+	}
+	if config.host != "" {
+		compareReq.Host = config.host
 	}
 
 	for key, values := range req.Header {
@@ -173,11 +173,16 @@ func compareHash(req *http.Request, resp *http.Response, result responseResult, 
 	compareMD5 := compareResp.Header.Get("X-Content-MD5")
 
 	if clientMD5 != "" && compareMD5 != "" {
-		if clientMD5 == compareMD5 {
-			fmt.Printf("Hash 对比成功 - URI: %s, Client MD5: %s, Compare Server MD5: %s\n", req.URL.RequestURI(), clientMD5, compareMD5)
-		} else {
+		traceID := resp.Header.Get(config.ReqIDHdrName)
+		if traceID == "" {
+			traceID = "unknown"
+		}
+		dataLen := result.readBytes
 
-			fmt.Printf("Hash 对比失败 - URI: %s, Client MD5: %s, Compare Server MD5: %s\n", req.URL.RequestURI(), clientMD5, compareMD5)
+		if clientMD5 == compareMD5 {
+			fmt.Printf("Hash 对比成功 - URI: %s, Trace-ID: %s, Client MD5: %s, Compare Server MD5: %s, 数据长度: %d\n", req.URL.RequestURI(), traceID, clientMD5, compareMD5, dataLen)
+		} else {
+			fmt.Printf("Hash 对比失败 - URI: %s, Trace-ID: %s, Client MD5: %s, Compare Server MD5: %s, 数据长度: %d\n", req.URL.RequestURI(), traceID, clientMD5, compareMD5, dataLen)
 			os.Exit(1)
 		}
 	}

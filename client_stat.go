@@ -42,7 +42,7 @@ func printFinalStats(baseURL string, startTime time.Time) {
 
 func recordRequestResult(resp *http.Response, req *http.Request, result responseResult, requestStartTime time.Time) {
 	if result.err != nil {
-		fmt.Println("read body err :", result.err, req.URL.Path, result.readBytes, time.Now().Format("2006-01-02 15:04:05.000"), req.Header.Get(config.ReqIDHdrName))
+		fmt.Println("read body err :", result.err, req.URL.Path, req.Header.Get("Range"), result.readBytes, requestStartTime.Format("2006-01-02 15:04:05.000"), time.Now().Format("2006-01-02 15:04:05.000"), req.Header.Get(config.ReqIDHdrName))
 		if resp != nil {
 			fmt.Println("respHeader:", resp.Header)
 		}

@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
-	"io"
 	"log"
 	"math/big"
 	mrand "math/rand"
@@ -32,10 +31,64 @@ type respCacheItem struct {
 	etag string
 }
 
+// fileETagCacheItem 存储文件 ETag 缓存
+type fileETagCacheItem struct {
+	etag        string    // 文件内容的 MD5 ETag
+	modTime     time.Time // 文件最后修改时间
+	size        int64     // 文件大小
+}
+
 var (
 	respCache      = make(map[int]respCacheItem)
 	respCacheMutex sync.RWMutex
+	
+	// fileETagCache 缓存本地文件的 ETag，key 为文件路径
+	fileETagCache      = make(map[string]*fileETagCacheItem)
+	fileETagCacheMutex sync.RWMutex
 )
+
+// getFileETag 获取文件的 ETag，如果文件变化了则重新计算
+// 使用文件的修改时间和大小来判断文件是否变化
+func getFileETag(filePath string) (string, error) {
+	// 获取文件信息
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return "", fmt.Errorf("获取文件信息失败: %w", err)
+	}
+	
+	modTime := fileInfo.ModTime()
+	size := fileInfo.Size()
+	
+	// 检查缓存
+	fileETagCacheMutex.RLock()
+	cached, exists := fileETagCache[filePath]
+	fileETagCacheMutex.RUnlock()
+	
+	// 如果缓存存在且文件未变化，返回缓存的 ETag
+	if exists && cached.modTime.Equal(modTime) && cached.size == size {
+		return cached.etag, nil
+	}
+	
+	// 文件变化或缓存不存在，重新计算 ETag
+	fileContent, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("读取文件失败: %w", err)
+	}
+	
+	hash := md5.Sum(fileContent)
+	etag := hex.EncodeToString(hash[:])
+	
+	// 更新缓存
+	fileETagCacheMutex.Lock()
+	fileETagCache[filePath] = &fileETagCacheItem{
+		etag:    etag,
+		modTime: modTime,
+		size:    size,
+	}
+	fileETagCacheMutex.Unlock()
+	
+	return etag, nil
+}
 
 // generateSelfSignedCert 生成自签证书
 func generateSelfSignedCert(certFile, keyFile, domain string) error {
@@ -143,8 +196,7 @@ func parseFileSize(filePath string) (int64, error) {
 // generateFile 生成指定大小的文件
 func generateFile(filePath string, size int64) error {
 	// 确保目录存在
-	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		return fmt.Errorf("创建目录失败: %w", err)
 	}
 
@@ -155,37 +207,26 @@ func generateFile(filePath string, size int64) error {
 	}
 	defer f.Close()
 
-	// 生成文件内容
-	// 使用 1MB 的缓冲区
-	bufferSize := int64(1024 * 1024)
+	// 使用 1MB 的缓冲区生成文件内容
+	const bufferSize = 1024 * 1024
 	buffer := make([]byte, bufferSize)
-
-	// 填充缓冲区
+	pattern := "0123456789"
 	for i := range buffer {
-		buffer[i] = 'x'
+		buffer[i] = pattern[i%len(pattern)]
 	}
 
 	// 写入文件
-	written := int64(0)
+	var written int64
 	for written < size {
-		// 计算本次写入的大小
 		writeSize := bufferSize
-		if written+writeSize > size {
-			writeSize = size - written
+		if written+int64(writeSize) > size {
+			writeSize = int(size - written)
 		}
-
-		// 写入数据
 		n, err := f.Write(buffer[:writeSize])
 		if err != nil {
 			return fmt.Errorf("写入文件失败: %w", err)
 		}
-
 		written += int64(n)
-	}
-
-	// 确保文件大小正确
-	if err := f.Truncate(size); err != nil {
-		return fmt.Errorf("截断文件失败: %w", err)
 	}
 
 	fmt.Printf("文件已生成: %s, 大小: %d 字节\n", filePath, size)
@@ -464,9 +505,8 @@ func (w *responseWriterWrapper) WriteHeader(statusCode int) {
 	w.ResponseWriter.WriteHeader(statusCode)
 }
 
-func serverHandler(w http.ResponseWriter, r *http.Request) {
-	startTime := time.Now()
-
+// prepareRequestContext 准备请求上下文，包括删除指定请求头、延迟响应头、获取跟踪ID等
+func prepareRequestContext(w http.ResponseWriter, r *http.Request) (traceID, method, host, url string, startTime time.Time) {
 	// 删除配置中指定的请求头
 	for _, hdr := range config.delReqHdrs {
 		r.Header.Del(hdr)
@@ -474,99 +514,148 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 
 	serveHeaderWithDelay()
 
-	traceID := getTraceID(r)
-	method := r.Method
-	host := r.Host
-	url := r.URL.String()
+	traceID = getTraceID(r)
+	method = r.Method
+	host = r.Host
+	url = r.URL.String()
+	startTime = time.Now()
 
-	// 处理 X-Req-Local-File 请求头
-	if localFilePath := r.Header.Get("X-Req-Local-File"); localFilePath != "" {
-		// 包装 ResponseWriter 以捕获状态码
-		wrapper := &responseWriterWrapper{
-			ResponseWriter: w,
-			statusCode:     http.StatusOK, // 默认状态码
+	return traceID, method, host, url, startTime
+}
+
+// parseChunkedHeader 解析 X-Use-Chunked-Transfer 请求头，返回是否使用 chunked 传输
+func parseChunkedHeader(r *http.Request) bool {
+	useChunked := config.useChunkedTransfer
+	if chunkedHeader := r.Header.Get("X-Use-Chunked-Transfer"); chunkedHeader != "" {
+		switch chunkedHeader {
+		case "true", "1":
+			useChunked = true
+		case "false", "0":
+			useChunked = false
 		}
+	}
+	return useChunked
+}
 
-		// 检查文件是否存在
-		if _, err := os.Stat(localFilePath); os.IsNotExist(err) {
-			http.Error(wrapper, fmt.Sprintf("文件不存在: %s", localFilePath), http.StatusNotFound)
-			logAccess(traceID, r, wrapper, startTime, 0, wrapper.statusCode, nil)
+// handleFileError 处理文件相关错误
+func handleFileError(w http.ResponseWriter, r *http.Request, statusCode int, errMsg string, traceID string, startTime time.Time) {
+	wrapper := &responseWriterWrapper{
+		ResponseWriter: w,
+		statusCode:     statusCode,
+	}
+	http.Error(wrapper, errMsg, statusCode)
+	logAccess(traceID, r, wrapper, startTime, 0, wrapper.statusCode, fmt.Errorf(errMsg))
+}
+
+// processRequestWithContent 使用指定的内容处理请求
+func processRequestWithContent(w http.ResponseWriter, r *http.Request, content []byte, encoding, language, etag string, useChunked bool, traceID, method, host, url string, startTime time.Time) {
+	// 处理 X-Mock-302-Location-Map 请求头
+	if locationMap := r.Header.Get("X-Mock-302-Location-Map"); locationMap != "" {
+		handled := handleMock302Redirect(w, r, locationMap, language, traceID, method, host, url, startTime)
+		if handled {
 			return
 		}
+	}
 
-		// 打开文件
-		file, err := os.Open(localFilePath)
-		if err != nil {
-			http.Error(wrapper, fmt.Sprintf("打开文件失败: %v", err), http.StatusInternalServerError)
-			logAccess(traceID, r, wrapper, startTime, 0, wrapper.statusCode, err)
-			return
-		}
-		defer file.Close()
-
-		// 获取文件信息
-		fileInfo, err := file.Stat()
-		if err != nil {
-			http.Error(wrapper, fmt.Sprintf("获取文件信息失败: %v", err), http.StatusInternalServerError)
-			logAccess(traceID, r, wrapper, startTime, 0, wrapper.statusCode, err)
-			return
-		}
-
-		// 设置响应头
-		wrapper.Header().Set("Content-Type", "application/octet-stream")
-		wrapper.Header().Set("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
-		wrapper.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filepath.Base(localFilePath)))
-
-		// 检查是否使用 chunked 传输
-		if chunkedHeader := r.Header.Get("X-Use-Chunked-Transfer"); chunkedHeader != "" {
-			if chunkedHeader == "true" || chunkedHeader == "1" {
-				wrapper.Header().Set("Transfer-Encoding", "chunked")
-				wrapper.Header().Del("Content-Length")
-			} else if chunkedHeader == "false" || chunkedHeader == "0" {
-				// 确保使用 Content-Length
-				wrapper.Header().Del("Transfer-Encoding")
-				wrapper.Header().Set("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
-			}
-		} else if config.useChunkedTransfer {
-			// 使用配置的 chunked 传输
-			wrapper.Header().Set("Transfer-Encoding", "chunked")
-			wrapper.Header().Del("Content-Length")
-		}
-
-		// 发送响应头
-		wrapper.WriteHeader(http.StatusOK)
-
-		// 发送文件内容
-		if config.sendBytesPerInterval > 0 && config.sendIntervalMs > 0 {
-			// 限速发送
-			buffer := make([]byte, config.sendBytesPerInterval)
-			for {
-				n, err := file.Read(buffer)
-				if n > 0 {
-					wrapper.Write(buffer[:n])
-					time.Sleep(time.Duration(config.sendIntervalMs) * time.Millisecond)
-				}
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					http.Error(wrapper, fmt.Sprintf("读取文件失败: %v", err), http.StatusInternalServerError)
-					logAccess(traceID, r, wrapper, startTime, 0, wrapper.statusCode, err)
-					return
-				}
-			}
-		} else {
-			// 直接发送文件
-			if _, err := io.Copy(wrapper, file); err != nil {
-				http.Error(wrapper, fmt.Sprintf("发送文件失败: %v", err), http.StatusInternalServerError)
-				logAccess(traceID, r, wrapper, startTime, 0, wrapper.statusCode, err)
-				return
-			}
-		}
-
-		// 记录访问日志
-		logAccess(traceID, r, wrapper, startTime, 0, wrapper.statusCode, nil)
+	// 处理 X-Mock-Resp-Code 请求头
+	if mockRespCode := r.Header.Get("X-Mock-Resp-Code"); mockRespCode != "" {
+		handleMockResponse(w, r, content, encoding, language, etag, traceID, method, host, url, startTime, mockRespCode)
 		return
 	}
+
+	if method == "HEAD" {
+		handleHeadResponse(w, r, content, encoding, language, etag, traceID, method, host, url, startTime)
+		return
+	}
+
+	// 处理预压缩
+	if config.preCompress && encoding != "" {
+		if r.Header.Get("Range") != "" {
+			handlePreCompressedRange(w, r, content, encoding, language, etag, traceID, method, host, url, startTime)
+		} else {
+			handlePreCompressedResponse(w, r, content, encoding, language, etag, traceID, method, host, url, startTime)
+		}
+		return
+	}
+
+	// 处理 Range 请求
+	if r.Header.Get("Range") != "" {
+		handleRangeRequest(w, r, content, language, etag, traceID, method, host, url, startTime)
+		return
+	}
+
+	// 处理正常响应
+	handleNormalResponse(w, r, content, encoding, language, etag, useChunked, traceID, method, host, url, startTime)
+}
+
+// handleLocalFileRequest 处理 X-Req-Local-File 请求头指定的本地文件请求
+// 如果请求包含 X-Req-Local-File 头且文件存在，则处理该请求并返回 true
+// 否则返回 false，调用方应继续处理其他逻辑
+func handleLocalFileRequest(w http.ResponseWriter, r *http.Request, responseBody []byte, etag string, lastModified time.Time, traceID, method, host, url string, startTime time.Time) bool {
+	// 获取 X-Req-Local-File 请求头
+	localFilePath := r.Header.Get("X-Req-Local-File")
+	if localFilePath == "" {
+		return false
+	}
+
+	// 检查文件是否存在
+	if _, err := os.Stat(localFilePath); os.IsNotExist(err) {
+		handleFileError(w, r, http.StatusNotFound, fmt.Sprintf("文件不存在: %s", localFilePath), traceID, startTime)
+		return true
+	}
+
+	// 读取文件内容到内存
+	fileContent, err := os.ReadFile(localFilePath)
+	if err != nil {
+		handleFileError(w, r, http.StatusInternalServerError, fmt.Sprintf("读取文件失败: %v", err), traceID, startTime)
+		return true
+	}
+
+	// 协商编码（压缩）
+	ae := r.Header.Get("Accept-Encoding")
+	encoding := negotiateEncoding(ae)
+
+	// 协商语言
+	al := r.Header.Get("Accept-Language")
+	language := negotiateLanguage(al)
+
+	// 检查请求头是否控制 chunked 传输
+	useChunked := parseChunkedHeader(r)
+
+	// 动态获取 etag（如果文件变化了会重新计算）
+	var fileEtag string
+	if config.etag {
+		fileEtag, err = getFileETag(localFilePath)
+		if err != nil {
+			handleFileError(w, r, http.StatusInternalServerError, fmt.Sprintf("计算 ETag 失败: %v", err), traceID, startTime)
+			return true
+		}
+	}
+
+	// 生成文件的 Last-Modified 时间（使用文件的修改时间）
+	var fileLastModified time.Time
+	if fileInfo, err := os.Stat(localFilePath); err == nil {
+		fileLastModified = fileInfo.ModTime()
+	} else {
+		fileLastModified = getLastModified(fileContent)
+	}
+
+	// 检查条件请求（If-None-Match 和 If-Modified-Since）
+	if config.etag && fileEtag != "" {
+		if checkConditionalRequest(r, fileEtag, fileLastModified) {
+			handle304Response(w, r, fileContent, encoding, language, fileEtag, fileLastModified, traceID, method, host, url, startTime)
+			return true
+		}
+	}
+
+	// 使用提取的函数处理请求
+	processRequestWithContent(w, r, fileContent, encoding, language, fileEtag, useChunked, traceID, method, host, url, startTime)
+	return true
+}
+
+func serverHandler(w http.ResponseWriter, r *http.Request) {
+	// 准备请求上下文
+	traceID, method, host, url, startTime := prepareRequestContext(w, r)
 
 	// 包装 ResponseWriter 以捕获状态码
 	wrapper := &responseWriterWrapper{
@@ -574,18 +663,31 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 		statusCode:     http.StatusOK, // 默认状态码
 	}
 
+	// 先生成响应体（用于 ETag 生成和条件请求检查）
 	responseSize := serverGetRespSize(r)
 	responseBody, etag := genRespBody(responseSize)
 
-	// 检查请求头是否控制 chunked 传输
-	useChunked := config.useChunkedTransfer
-	if chunkedHeader := r.Header.Get("X-Use-Chunked-Transfer"); chunkedHeader != "" {
-		if chunkedHeader == "true" || chunkedHeader == "1" {
-			useChunked = true
-		} else if chunkedHeader == "false" || chunkedHeader == "0" {
-			useChunked = false
+	// 生成 Last-Modified 时间
+	lastModified := getLastModified(responseBody)
+
+	// 检查条件请求（If-None-Match 和 If-Modified-Since）
+	// 在 handleLocalFileRequest 之前检查，如果匹配 304 则直接返回
+	if config.etag && etag != "" {
+		if checkConditionalRequest(r, etag, lastModified) {
+			handle304Response(wrapper, r, responseBody, "", "", etag, lastModified, traceID, method, host, url, startTime)
+			return
 		}
 	}
+
+	// 处理 X-Req-Local-File 请求头
+	// 注意：如果请求有 X-Req-Local-File 头，会在 handleLocalFileRequest 中重新处理
+	// 为了简化，这里先检查条件请求，如果不匹配 304，再处理本地文件
+	if handled := handleLocalFileRequest(wrapper, r, responseBody, etag, lastModified, traceID, method, host, url, startTime); handled {
+		return
+	}
+
+	// 检查请求头是否控制 chunked 传输
+	useChunked := parseChunkedHeader(r)
 
 	ae := r.Header.Get("Accept-Encoding")
 	encoding := negotiateEncoding(ae)
@@ -593,78 +695,91 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 	al := r.Header.Get("Accept-Language")
 	language := negotiateLanguage(al)
 
-	// 处理 X-Mock-302-Location-Map 请求头 - 返回 302 重定向
-	if locationMap := r.Header.Get("X-Mock-302-Location-Map"); locationMap != "" {
-		handled := handleMock302Redirect(wrapper, r, locationMap, language, traceID, method, host, url, startTime)
-		if handled {
-			return
-		}
-	}
-
-	// 处理 X-Mock-Resp-Code 请求头 - 返回自定义状态码响应
-	if mockRespCode := r.Header.Get("X-Mock-Resp-Code"); mockRespCode != "" {
-		handleMockResponse(wrapper, r, responseBody, encoding, language, etag, traceID, method, host, url, startTime, mockRespCode)
-		return
-	}
-
-	if method == "HEAD" {
-		handleHeadResponse(wrapper, r, responseBody, encoding, language, etag, traceID, method, host, url, startTime)
-		return
-	}
-
-	if config.preCompress && encoding != "" {
-		if r.Header.Get("Range") != "" {
-			handlePreCompressedRange(wrapper, r, responseBody, encoding, language, etag, traceID, method, host, url, startTime)
-		} else {
-			handlePreCompressedResponse(wrapper, r, responseBody, encoding, language, etag, traceID, method, host, url, startTime)
-		}
-		return
-	}
-
-	if r.Header.Get("Range") != "" {
-		handleRangeRequest(wrapper, r, responseBody, language, etag, traceID, method, host, url, startTime)
-		return
-	}
-
-	handleNormalResponse(wrapper, r, responseBody, encoding, language, etag, useChunked, traceID, method, host, url, startTime)
+	// 使用提取的函数处理请求
+	processRequestWithContent(wrapper, r, responseBody, encoding, language, etag, useChunked, traceID, method, host, url, startTime)
 }
 
-func startServer() {
-	initAccessLog()
-	defer closeAccessLog()
+// generateLocalFileIfNeeded 根据需要生成本地文件
+// 如果文件已存在，则跳过生成
+func generateLocalFileIfNeeded() {
+	if config.localFile == "" {
+		return
+	}
+	
+	// 检查文件是否已存在
+	if _, err := os.Stat(config.localFile); err == nil {
+		log.Printf("文件已存在，跳过生成: %s", config.localFile)
+		return
+	}
+	
+	size, err := parseFileSize(config.localFile)
+	if err != nil {
+		log.Fatalf("解析文件大小失败: %v", err)
+	}
+	
+	if err := generateFile(config.localFile, size); err != nil {
+		log.Fatalf("生成文件失败: %v", err)
+	}
+}
 
-	// 处理本地文件生成
-	if config.localFile != "" {
-		size, err := parseFileSize(config.localFile)
-		if err != nil {
-			log.Fatalf("解析文件大小失败: %v", err)
-		}
-		if err := generateFile(config.localFile, size); err != nil {
-			log.Fatalf("生成文件失败: %v", err)
-		}
+// generateCertIfNeeded 根据需要生成自签证书
+func generateCertIfNeeded() {
+	if config.generateCert == "" {
+		return
+	}
+	
+	if config.certFile == "" {
+		config.certFile = "cert.pem"
+	}
+	if config.keyFile == "" {
+		config.keyFile = "key.pem"
+	}
+	
+	if err := generateSelfSignedCert(config.certFile, config.keyFile, config.generateCert); err != nil {
+		log.Fatalf("生成自签证书失败: %v", err)
+	}
+}
+
+// createTLSConfig 创建 TLS 配置
+func createTLSConfig(cert tls.Certificate) *tls.Config {
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+	tlsConfig.Certificates = []tls.Certificate{cert}
+
+	// 控制 SNI 校验
+	if !config.enableSNI {
+		tlsConfig.InsecureSkipVerify = true
 	}
 
-	// 处理自签证书生成
-	if config.generateCert != "" {
-		if config.certFile == "" {
-			config.certFile = "cert.pem"
-		}
-		if config.keyFile == "" {
-			config.keyFile = "key.pem"
-		}
-		if err := generateSelfSignedCert(config.certFile, config.keyFile, config.generateCert); err != nil {
-			log.Fatalf("生成自签证书失败: %v", err)
-		}
+	// 添加 SNI 打印功能
+	tlsConfig.GetCertificate = func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		// 打印 SNI 到文件
+		go func() {
+			f, err := os.OpenFile("/tmp/cache_press.sni.output", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				log.Printf("打开 SNI 输出文件失败: %v", err)
+				return
+			}
+			defer f.Close()
+			_, err = fmt.Fprintf(f, "%s\n", clientHello.ServerName)
+			if err != nil {
+				log.Printf("写入 SNI 到文件失败: %v", err)
+			}
+		}()
+		return &cert, nil
 	}
 
-	http.HandleFunc("/", serverHandler)
+	return tlsConfig
+}
 
+// startHTTPServers 启动 HTTP 服务器
+func startHTTPServers() {
 	// 设置默认端口
 	if len(config.ports) == 0 {
 		config.ports = []int{9000}
 	}
 
-	// 启动 HTTP 服务器
 	for _, port := range config.ports {
 		httpAddr := fmt.Sprintf(":%d", port)
 		if config.listenIP != "" {
@@ -683,6 +798,47 @@ func startServer() {
 			}
 		}(httpAddr, httpServer)
 	}
+}
+
+// startHTTPSServers 启动 HTTPS 服务器
+func startHTTPSServers(cert tls.Certificate) {
+	for _, port := range config.httpsPorts {
+		httpsAddr := fmt.Sprintf(":%d", port)
+		if config.listenIP != "" {
+			httpsAddr = fmt.Sprintf("%s:%d", config.listenIP, port)
+		}
+
+		tlsConfig := createTLSConfig(cert)
+
+		httpsServer := &http.Server{
+			Addr:              httpsAddr,
+			ReadHeaderTimeout: 10 * time.Second,
+			TLSConfig:         tlsConfig,
+		}
+
+		fmt.Printf("HTTPS 服务器监听地址: %s\n", httpsAddr)
+		go func(addr string, srv *http.Server) {
+			if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("HTTPS 服务器启动失败 (地址: %s): %v", addr, err)
+			}
+		}(httpsAddr, httpsServer)
+	}
+}
+
+func startServer() {
+	initAccessLog()
+	defer closeAccessLog()
+
+	// 生成本地文件（如果需要）
+	generateLocalFileIfNeeded()
+
+	// 生成自签证书（如果需要）
+	generateCertIfNeeded()
+
+	http.HandleFunc("/", serverHandler)
+
+	// 启动 HTTP 服务器
+	startHTTPServers()
 
 	// 启动 HTTPS 服务器
 	if len(config.httpsPorts) > 0 {
@@ -696,53 +852,7 @@ func startServer() {
 			log.Fatalf("加载证书失败: %v", err)
 		}
 
-		for _, port := range config.httpsPorts {
-			httpsAddr := fmt.Sprintf(":%d", port)
-			if config.listenIP != "" {
-				httpsAddr = fmt.Sprintf("%s:%d", config.listenIP, port)
-			}
-
-			tlsConfig := &tls.Config{
-				MinVersion: tls.VersionTLS12,
-			}
-			tlsConfig.Certificates = []tls.Certificate{cert}
-
-			// 控制 SNI 校验
-			if !config.enableSNI {
-				tlsConfig.InsecureSkipVerify = true
-			}
-
-			// 添加 SNI 打印功能
-			tlsConfig.GetCertificate = func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-				// 打印 SNI 到文件
-				go func() {
-					f, err := os.OpenFile("/tmp/cache_press.sni.output", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-					if err != nil {
-						log.Printf("打开 SNI 输出文件失败: %v", err)
-						return
-					}
-					defer f.Close()
-					_, err = fmt.Fprintf(f, "%s\n", clientHello.ServerName)
-					if err != nil {
-						log.Printf("写入 SNI 到文件失败: %v", err)
-					}
-				}()
-				return &cert, nil
-			}
-
-			httpsServer := &http.Server{
-				Addr:              httpsAddr,
-				ReadHeaderTimeout: 10 * time.Second,
-				TLSConfig:         tlsConfig,
-			}
-
-			fmt.Printf("HTTPS 服务器监听地址: %s\n", httpsAddr)
-			go func(addr string, srv *http.Server) {
-				if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-					log.Fatalf("HTTPS 服务器启动失败 (地址: %s): %v", addr, err)
-				}
-			}(httpsAddr, httpsServer)
-		}
+		startHTTPSServers(cert)
 
 		// 启用了 HTTPS 服务器，需要阻塞
 		select {}

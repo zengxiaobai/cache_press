@@ -94,6 +94,8 @@ cache_press 是一个用于测试缓存服务器性能的压测工具，支持�
 | `-use-chunked-transfer` | 是否使用 chunked 传输 (默认 false 使用 Content-Length) | false |
 | `-vary` | Vary 头配置字符串，格式: "[\"Accept-Encoding\",\"User-Agent\"]" | "" |
 | `-add-resp-header` | 添加响应头 (格式: "Header: Value"，可多次指定) | - |
+| `-local-file` | 启动时生成的本地文件路径，大小从文件名推断 (如 /tmp/20GB) | "" |
+| `-del-req-hdr` | 强制删除请求头配置 (格式: ["hdr1","hdr2"]) | "" |
 
 ## 请求头控制
 
@@ -111,6 +113,10 @@ cache_press 是一个用于测试缓存服务器性能的压测工具，支持�
 | `X-Resp-Add-Header` | 动态添加响应头（格式: "Header: Value"，支持多个用逗号分隔） | `Cache-Control: max-age=3600` 或 `Cache-Control: max-age=3600, X-Custom: value` |
 | `X-Mock-304` | 触发服务器返回 304 Not Modified 响应（无响应体，但响应头保持不变） | 任意值（如 "true"） |
 | `X-Mock-302-Location-Map` | 触发服务器返回 302 重定向响应，值为 JSON 格式的映射表 | `[{"orig":"http://example.com/path1","location":"http://example.com/path2"}]` |
+| `X-Req-Local-File` | 从本地文件响应内容（服务器从指定路径读取文件并返回） | `/tmp/testfile.dat` |
+| `X-Use-Chunked-Transfer` | 控制是否使用 chunked 传输编码（true/1 或 false/0） | `true` 或 `false` |
+| `X-press-size` | 控制响应体大小（覆盖服务端默认配置） | `2048` |
+| `X-Mock-Resp-Code` | 模拟自定义响应状态码（如 403、500 等） | `403` |
 
 ### 服务器响应头
 
@@ -300,6 +306,56 @@ EOF
 # 使用 cache_press 客户端发送 302 请求
 ./cache_press -mode=client -addr=192.168.1.100:8080 \
   -req-header-file=req-header-302.txt -fixed-url="/path1" -conns=100 -qps=1000 -duration=60s
+```
+
+#### 使用 X-Req-Local-File 请求头从本地文件响应
+```bash
+# 使用 curl 测试从本地文件响应
+curl -v -H "X-Req-Local-File: /tmp/testfile.dat" http://192.168.1.100:8080/path1
+
+# 创建请求头文件 req-header-local.txt
+cat > req-header-local.txt << EOF
+X-Req-Local-File: /tmp/testfile.dat
+EOF
+
+# 使用 cache_press 客户端从本地文件请求
+./cache_press -mode=client -addr=192.168.1.100:8080 \
+  -req-header-file=req-header-local.txt -fixed-url="/path1" -conns=100 -qps=1000 -duration=60s
+```
+
+#### 使用 X-Use-Chunked-Transfer 请求头控制传输编码
+```bash
+# 使用 chunked 传输
+curl -v -H "X-Use-Chunked-Transfer: true" http://192.168.1.100:8080/test.js
+
+# 使用 Content-Length 传输
+curl -v -H "X-Use-Chunked-Transfer: false" http://192.168.1.100:8080/test.js
+```
+
+#### 使用 X-press-size 请求头控制响应大小
+```bash
+# 请求 2048 字节的响应
+curl -v -H "X-press-size: 2048" http://192.168.1.100:8080/test.js
+```
+
+#### 使用 X-Mock-Resp-Code 请求头模拟自定义响应码
+```bash
+# 模拟 403 Forbidden 响应
+curl -v -H "X-Mock-Resp-Code: 403" http://192.168.1.100:8080/test.js
+
+# 模拟 500 Internal Server Error 响应
+curl -v -H "X-Mock-Resp-Code: 500" http://192.168.1.100:8080/test.js
+```
+
+#### 使用 local-file 参数启动服务并生成大文件
+```bash
+# 启动时生成 20GB 的测试文件
+./cache_press -mode=server -port=9000 -local-file=/tmp/20GB
+
+# 启动时使用已生成的本地文件响应（通过请求头 X-Req-Local-File）
+./cache_press -mode=server -port=9000
+# 客户端请求时带上 X-Req-Local-File 头
+curl -H "X-Req-Local-File: /tmp/20GB" http://127.0.0.1:9000/test
 ```
 
 ## 配置文件示例
