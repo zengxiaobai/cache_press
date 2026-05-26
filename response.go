@@ -21,6 +21,7 @@ import (
 type AccessLogEntry struct {
 	RequestID        string            `json:"request_id"`
 	URL              string            `json:"url"`
+	ClientAddr       string            `json:"client_addr"`       // 客户端地址
 	RequestHeaders   map[string]string `json:"request_headers"`
 	ResponseHeaders  map[string]string `json:"response_headers"`
 	RequestStartTime int64             `json:"request_start_time"` // 请求开始时间戳（毫秒）
@@ -74,6 +75,7 @@ func logAccess(requestID string, r *http.Request, w http.ResponseWriter, startTi
 	entry := AccessLogEntry{
 		RequestID:        requestID,
 		URL:              r.URL.String(),
+		ClientAddr:       r.RemoteAddr,
 		RequestHeaders:   make(map[string]string),
 		ResponseHeaders:  make(map[string]string),
 		RequestStartTime: startTime.UnixMilli(),
@@ -259,7 +261,7 @@ func addRequestHeadersToResponse(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, language string, etag string, traceID, method, host, url string, startTime time.Time) {
+func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, language string, etag string, useChunked bool, traceID, method, host, url string, startTime time.Time) {
 	compressedBody := getPreCompressedBody(responseBody, encoding)
 	contentType := "application/octet-stream"
 
@@ -319,10 +321,15 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 		fmt.Printf("预压缩 Range 响应 ETag - Trace-ID: %s, 大小: %d, ETag: %s\n", traceID, len(compressedBody), etag)
 	}
 
+	// 如果启用 chunked，设置 Transfer-Encoding
+	if useChunked {
+		w.Header().Set("Transfer-Encoding", "chunked")
+	}
+
 	if len(ranges) == 1 {
-		handleSingleRange(w, ranges[0], compressedBody, contentType, md5Sum)
+		handleSingleRange(w, ranges[0], compressedBody, contentType, md5Sum, useChunked, "")
 	} else {
-		handleMultiRange(w, ranges, compressedBody, contentType, md5Sum)
+		handleMultiRange(w, ranges, compressedBody, contentType, md5Sum, useChunked, "")
 	}
 
 	// 打印响应头
@@ -337,13 +344,13 @@ func handlePreCompressedRange(w http.ResponseWriter, r *http.Request, responseBo
 	logAccess(traceID, r, w, startTime, 0, statusCode, nil)
 
 	bodyCompleteTime := time.Now()
-	fmt.Printf("预压缩 Range 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Encoding: %s, Start: %s, BodyComplete: %s\n",
+	fmt.Printf("预压缩 Range 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Encoding: %s, Start: %s, BodyComplete: %s, Client: %s\n",
 		traceID, host, url, method, ranges, encoding,
 		startTime.Format("2006-01-02 15:04:05.000"),
-		bodyCompleteTime.Format("2006-01-02 15:04:05.000"))
+		bodyCompleteTime.Format("2006-01-02 15:04:05.000"), r.RemoteAddr)
 }
 
-func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, language string, etag string, traceID, method, host, url string, startTime time.Time) {
+func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, language string, etag string, useChunked bool, traceID, method, host, url string, startTime time.Time) {
 	compressedBody := getPreCompressedBody(responseBody, encoding)
 	contentType := "application/octet-stream"
 
@@ -365,7 +372,11 @@ func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, respons
 	// 设置 Vary 头
 	setVaryHeaders(w, encoding, language)
 
-	if !config.useChunkedTransfer {
+	// 对于 chunked 传输，不设置 Content-Length，设置 Transfer-Encoding: chunked
+	if useChunked {
+		w.Header().Set("Transfer-Encoding", "chunked")
+		w.Header().Del("Content-Length")
+	} else {
 		w.Header().Set("Content-Length", strconv.Itoa(len(compressedBody)))
 	}
 
@@ -386,8 +397,17 @@ func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, respons
 	w.WriteHeader(http.StatusOK)
 	headerSendTime := time.Now()
 	serveBodyWithDelay()
-	total, err := sendData(w, compressedBody)
-	fmt.Printf("sendData compressed: total=%d, err=%v\n", total, err)
+
+	var total int
+	var err error
+	if useChunked {
+		// chunked 传输：分块写入并 flush
+		total, err = sendDataChunked(w, compressedBody)
+		fmt.Printf("sendDataChunked compressed: total=%d, err=%v\n", total, err)
+	} else {
+		total, err = sendData(w, compressedBody)
+		fmt.Printf("sendData compressed: total=%d, err=%v\n", total, err)
+	}
 
 	closeConnectionIfNeeded(w)
 
@@ -403,22 +423,42 @@ func handlePreCompressedResponse(w http.ResponseWriter, r *http.Request, respons
 	logAccess(traceID, r, w, startTime, total, statusCode, err)
 
 	bodyCompleteTime := time.Now()
-	fmt.Printf("预压缩响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Encoding: %s, Start: %s, HeaderSent: %s, BodyComplete: %s, BodyLength: %d, TotalSent: %d, Error: %v\n",
+	fmt.Printf("预压缩响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Encoding: %s, Start: %s, HeaderSent: %s, BodyComplete: %s, BodyLength: %d, TotalSent: %d, Error: %v, Client: %s\n",
 		traceID, host, url, method, encoding,
 		startTime.Format("2006-01-02 15:04:05.000"),
 		headerSendTime.Format("2006-01-02 15:04:05.000"),
 		bodyCompleteTime.Format("2006-01-02 15:04:05.000"),
-		len(compressedBody), total, err)
+		len(compressedBody), total, err, r.RemoteAddr)
 }
 
-func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []byte, language string, etag string, traceID, method, host, url string, startTime time.Time) {
+func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []byte, language string, etag string, useChunked bool, traceID, method, host, url string, startTime time.Time, localFilePath string) {
 	contentType := "application/octet-stream"
 
-	// 打印请求头
 	logRequestHeaders(r, traceID)
+
+	localFilePathForLog := localFilePath
+	if localFilePathForLog == "" {
+		localFilePathForLog = r.Header.Get("X-Req-Local-File")
+	}
+
+	writeDebugLog("[DEBUG] handleRangeRequest: traceID=%s, bodyLen=%d, localFile=%s, Range=%s\n",
+		traceID, len(responseBody), localFilePathForLog, r.Header.Get("Range"))
+
+	if localFilePathForLog != "" {
+		if fileInfo, err := os.Stat(localFilePathForLog); err == nil {
+			expectedSize := fileInfo.Size()
+			if int64(len(responseBody)) != expectedSize {
+				writeDebugLog("[DEBUG] handleRangeRequest: MISMATCH traceID=%s, expectedSize=%d, bodyLen=%d\n",
+					traceID, expectedSize, len(responseBody))
+				logRangeMismatch(localFilePathForLog, expectedSize, int64(len(responseBody)), 0, 0, len(responseBody))
+			}
+		}
+	}
 
 	ranges, err := parseRangeHeader(r.Header.Get("Range"), int64(len(responseBody)))
 	if err != nil {
+		writeDebugLog("[DEBUG] handleRangeRequest: parseRangeHeader error traceID=%s, err=%v, Range=%s, bodyLen=%d\n",
+			traceID, err, r.Header.Get("Range"), len(responseBody))
 		// 添加响应头文件中的内容
 		addResponseHeaders(w)
 
@@ -444,6 +484,9 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 		return
 	}
 
+	writeDebugLog("[DEBUG] handleRangeRequest: parsed ranges traceID=%s, rangesCount=%d, ranges=%v, bodyLen=%d\n",
+		traceID, len(ranges), ranges, len(responseBody))
+
 	var md5Sum string
 	if config.enableHash {
 		md5Sum = calculateRangeMD5(responseBody, ranges)
@@ -468,16 +511,21 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 		fmt.Printf("Range 响应 ETag - Trace-ID: %s, 大小: %d, ETag: %s\n", traceID, len(responseBody), etag)
 	}
 
+	// 如果启用 chunked，设置 Transfer-Encoding
+	if useChunked {
+		w.Header().Set("Transfer-Encoding", "chunked")
+	}
+
 	bodyStartTime := time.Now()
-	fmt.Printf("Range 响应开始 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Start: %s, BodyComplete: %s\n",
+	fmt.Printf("Range 响应开始 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Start: %s, BodyComplete: %s, Client: %s\n",
 		traceID, host, url, method, ranges,
 		startTime.Format("2006-01-02 15:04:05.000"),
-		bodyStartTime.Format("2006-01-02 15:04:05.000"))
+		bodyStartTime.Format("2006-01-02 15:04:05.000"), r.RemoteAddr)
 
 	if len(ranges) == 1 {
-		handleSingleRange(w, ranges[0], responseBody, contentType, md5Sum)
+		handleSingleRange(w, ranges[0], responseBody, contentType, md5Sum, useChunked, localFilePath)
 	} else {
-		handleMultiRange(w, ranges, responseBody, contentType, md5Sum)
+		handleMultiRange(w, ranges, responseBody, contentType, md5Sum, useChunked, localFilePath)
 	}
 
 	// 打印响应头
@@ -492,10 +540,10 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, responseBody []b
 	logAccess(traceID, r, w, startTime, 0, statusCode, nil)
 
 	bodyCompleteTime := time.Now()
-	fmt.Printf("Range 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Start: %s, BodyComplete: %s\n",
+	fmt.Printf("Range 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Ranges: %v, Start: %s, BodyComplete: %s, Client: %s\n",
 		traceID, host, url, method, ranges,
 		startTime.Format("2006-01-02 15:04:05.000"),
-		bodyCompleteTime.Format("2006-01-02 15:04:05.000"))
+		bodyCompleteTime.Format("2006-01-02 15:04:05.000"), r.RemoteAddr)
 }
 
 func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, language string, etag string, useChunked bool, traceID, method, host, url string, startTime time.Time) {
@@ -592,12 +640,12 @@ func handleNormalResponse(w http.ResponseWriter, r *http.Request, responseBody [
 	logAccess(traceID, r, w, startTime, total, statusCode, err)
 
 	bodyCompleteTime := time.Now()
-	fmt.Printf("响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Start: %s, HeaderSent: %s, BodyComplete: %s,BodyLength: %d, TotalSent: %d, Error: %v\n",
+	fmt.Printf("响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Start: %s, HeaderSent: %s, BodyComplete: %s,BodyLength: %d, TotalSent: %d, Error: %v, Client: %s\n",
 		traceID, host, url, method,
 		startTime.Format("2006-01-02 15:04:05.000"),
 		headerSendTime.Format("2006-01-02 15:04:05.000"),
 		bodyCompleteTime.Format("2006-01-02 15:04:05.000"),
-		len(responseBody), total, err)
+		len(responseBody), total, err, r.RemoteAddr)
 }
 
 // checkConditionalRequest 检查条件请求头，如果匹配则返回 true（应返回 304）
@@ -714,9 +762,9 @@ func handle304Response(w http.ResponseWriter, r *http.Request, responseBody []by
 
 	logAccess(traceID, r, w, startTime, 0, statusCode, nil)
 
-	fmt.Printf("304 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Start: %s\n",
+	fmt.Printf("304 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Start: %s, Client: %s\n",
 		traceID, host, url, method,
-		startTime.Format("2006-01-02 15:04:05.000"))
+		startTime.Format("2006-01-02 15:04:05.000"), r.RemoteAddr)
 }
 
 type mockLocationMap struct {
@@ -769,9 +817,9 @@ func handleMock302Redirect(w http.ResponseWriter, r *http.Request, locationMapJS
 
 	logAccess(traceID, r, w, startTime, 0, statusCode, nil)
 
-	fmt.Printf("Mock 302 重定向 - Trace-ID: %s, RequestURL: %s, Location: %s, Method: %s, Host: %s, Start: %s\n",
+	fmt.Printf("Mock 302 重定向 - Trace-ID: %s, RequestURL: %s, Location: %s, Method: %s, Host: %s, Start: %s, Client: %s\n",
 		traceID, requestURL, redirectLocation, method, host,
-		startTime.Format("2006-01-02 15:04:05.000"))
+		startTime.Format("2006-01-02 15:04:05.000"), r.RemoteAddr)
 	return true
 }
 
@@ -800,7 +848,7 @@ func buildRequestURL(r *http.Request, host, url string) string {
 	return requestURL
 }
 
-func handleMockResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, language string, etag string, traceID, method, host, url string, startTime time.Time, mockRespCode string) {
+func handleMockResponse(w http.ResponseWriter, r *http.Request, responseBody []byte, encoding string, language string, etag string, useChunked bool, traceID, method, host, url string, startTime time.Time, mockRespCode string) {
 	// 解析状态码
 	statusCode, err := strconv.Atoi(mockRespCode)
 	var requestURL string
@@ -845,14 +893,20 @@ func handleMockResponse(w http.ResponseWriter, r *http.Request, responseBody []b
 	// 如果响应体不为空且不是 204 No Content，应该返回响应体
 	hasResponseBody := len(responseBody) > 0 && statusCode != http.StatusNoContent
 
-	// 对于 204 No Content，不应该设置 Content-Length
-	if statusCode != http.StatusNoContent {
-		if hasResponseBody {
-			// 如果有响应体，设置正确的 Content-Length
-			w.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
-		} else {
-			// 对于其他状态码，可以设置 Content-Length 为 0
-			w.Header().Set("Content-Length", "0")
+	// 对于 chunked 传输，不设置 Content-Length，设置 Transfer-Encoding: chunked
+	if useChunked {
+		w.Header().Set("Transfer-Encoding", "chunked")
+		w.Header().Del("Content-Length")
+	} else {
+		// 对于 204 No Content，不应该设置 Content-Length
+		if statusCode != http.StatusNoContent {
+			if hasResponseBody {
+				// 如果有响应体，设置正确的 Content-Length
+				w.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
+			} else {
+				// 对于其他状态码，可以设置 Content-Length 为 0
+				w.Header().Set("Content-Length", "0")
+			}
 		}
 	}
 
@@ -861,13 +915,25 @@ func handleMockResponse(w http.ResponseWriter, r *http.Request, responseBody []b
 	// 如果需要返回响应体
 	var total int
 	if hasResponseBody {
-		if encoding != "" {
-			compressedBody := getPreCompressedBody(responseBody, encoding)
-			total, err = sendData(w, compressedBody)
-			fmt.Printf("sendData compressed: total=%d, err=%v\n", total, err)
+		if useChunked {
+			// chunked 传输：分块写入并 flush
+			var bodyToSend []byte
+			if encoding != "" {
+				bodyToSend = getPreCompressedBody(responseBody, encoding)
+			} else {
+				bodyToSend = responseBody
+			}
+			total, err = sendDataChunked(w, bodyToSend)
+			fmt.Printf("sendDataChunked: total=%d, err=%v\n", total, err)
 		} else {
-			total, err = sendData(w, responseBody)
-			fmt.Printf("sendData: total=%d, err=%v\n", total, err)
+			if encoding != "" {
+				compressedBody := getPreCompressedBody(responseBody, encoding)
+				total, err = sendData(w, compressedBody)
+				fmt.Printf("sendData compressed: total=%d, err=%v\n", total, err)
+			} else {
+				total, err = sendData(w, responseBody)
+				fmt.Printf("sendData: total=%d, err=%v\n", total, err)
+			}
 		}
 	}
 
@@ -879,9 +945,9 @@ func handleMockResponse(w http.ResponseWriter, r *http.Request, responseBody []b
 
 	logAccess(traceID, r, w, startTime, total, statusCode, err)
 
-	fmt.Printf("Mock 响应完成 - Status: %d, Trace-ID: %s, URL: %s, Method: %s, Host: %s, Start: %s, TotalSent: %d, Error: %v\n",
+	fmt.Printf("Mock 响应完成 - Status: %d, Trace-ID: %s, URL: %s, Method: %s, Host: %s, Start: %s, TotalSent: %d, Error: %v, Client: %s\n",
 		statusCode, traceID, url, method, host,
-		startTime.Format("2006-01-02 15:04:05.000"), total, err)
+		startTime.Format("2006-01-02 15:04:05.000"), total, err, r.RemoteAddr)
 }
 
 func setConnectionHeader(w http.ResponseWriter) {
@@ -988,9 +1054,9 @@ func handleHeadResponse(w http.ResponseWriter, r *http.Request, responseBody []b
 	logAccess(traceID, r, w, startTime, 0, statusCode, nil)
 
 	bodyCompleteTime := time.Now()
-	fmt.Printf("HEAD 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Content-Length: %d, Start: %s, HeaderSent: %s, BodyComplete: %s\n",
+	fmt.Printf("HEAD 响应完成 - Trace-ID: %s, Host: %s, URL: %s, Method: %s, Content-Length: %d, Start: %s, HeaderSent: %s, BodyComplete: %s, Client: %s\n",
 		traceID, host, url, method, len(responseBody),
 		startTime.Format("2006-01-02 15:04:05.000"),
 		bodyCompleteTime.Format("2006-01-02 15:04:05.000"),
-		bodyCompleteTime.Format("2006-01-02 15:04:05.000"))
+		bodyCompleteTime.Format("2006-01-02 15:04:05.000"), r.RemoteAddr)
 }

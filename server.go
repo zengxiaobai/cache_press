@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/pierrec/xxHash/xxHash32"
 )
 
 // respCacheItem 存储响应体和对应的 etag
@@ -33,60 +35,205 @@ type respCacheItem struct {
 
 // fileETagCacheItem 存储文件 ETag 缓存
 type fileETagCacheItem struct {
-	etag        string    // 文件内容的 MD5 ETag
-	modTime     time.Time // 文件最后修改时间
-	size        int64     // 文件大小
+	etag       string    // 文件内容的 MD5 ETag
+	modTime    time.Time // 文件最后修改时间
+	size       int64     // 文件大小
+	xxhash     uint32    // 文件内容 xxhash 值
+	createTime time.Time // 缓存创建时间
 }
 
 var (
 	respCache      = make(map[int]respCacheItem)
 	respCacheMutex sync.RWMutex
-	
+
 	// fileETagCache 缓存本地文件的 ETag，key 为文件路径
 	fileETagCache      = make(map[string]*fileETagCacheItem)
 	fileETagCacheMutex sync.RWMutex
+
+	// debugLogMutex 保护调试日志文件写入
+	debugLogMutex sync.Mutex
+
+	// localFileCache 缓存本地文件内容，key 为文件路径
+	localFileCache      = make(map[string]*localFileCacheItem)
+	localFileCacheMutex sync.RWMutex
+
+	// localFileCacheTTL 缓存过期时间（默认 5 分钟）
+	localFileCacheTTL = 5 * time.Minute
+
+	// localFileCheckInterval 后台检测文件变化的间隔（默认 1 分钟）
+	localFileCheckInterval = 1 * time.Minute
 )
 
+// localFileCacheItem 缓存本地文件内容和元数据
+type localFileCacheItem struct {
+	content    []byte
+	modTime    time.Time
+	size       int64
+	createTime time.Time // 缓存创建时间
+	xxhash     uint32    // 文件内容 xxhash 值
+}
+
+// calculateFileXXHash 计算文件的 xxhash 值
+func calculateFileXXHash(filePath string) (uint32, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return 0, err
+	}
+	h := xxHash32.New(0)
+	h.Write(data)
+	return h.Sum32(), nil
+}
+
+// startLocalFileCacheChecker 启动后台文件缓存检测器
+func startLocalFileCacheChecker() {
+	go func() {
+		ticker := time.NewTicker(localFileCheckInterval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			checkLocalFileCacheUpdates()
+		}
+	}()
+	writeDebugLog("[DEBUG] startLocalFileCacheChecker: started, interval=%v\n", localFileCheckInterval)
+}
+
+// checkLocalFileCacheUpdates 定期检查缓存的文件是否有更新
+func checkLocalFileCacheUpdates() {
+	localFileCacheMutex.RLock()
+	filePaths := make([]string, 0, len(localFileCache))
+	for path := range localFileCache {
+		filePaths = append(filePaths, path)
+	}
+	localFileCacheMutex.RUnlock()
+
+	if len(filePaths) == 0 {
+		return
+	}
+
+	writeDebugLog("[DEBUG] checkLocalFileCacheUpdates: checking %d files\n", len(filePaths))
+
+	for _, filePath := range filePaths {
+		// 获取文件信息
+		fileInfo, err := os.Stat(filePath)
+		if err != nil {
+			writeDebugLog("[DEBUG] checkLocalFileCacheUpdates: stat failed for %s, err=%v\n", filePath, err)
+			continue
+		}
+
+		// 计算当前文件的 xxhash
+		currentXXHash, err := calculateFileXXHash(filePath)
+		if err != nil {
+			writeDebugLog("[DEBUG] checkLocalFileCacheUpdates: calculate xxhash failed for %s, err=%v\n", filePath, err)
+			continue
+		}
+
+		// 检查缓存是否有变化
+		localFileCacheMutex.RLock()
+		cachedItem, cached := localFileCache[filePath]
+		localFileCacheMutex.RUnlock()
+
+		if !cached {
+			continue
+		}
+
+		// 如果 xxhash 不同，说明文件有变化，重新加载
+		if cachedItem.xxhash != currentXXHash {
+			writeDebugLog("[DEBUG] checkLocalFileCacheUpdates: file changed, filePath=%s, oldXXHash=%d, newXXHash=%d\n",
+				filePath, cachedItem.xxhash, currentXXHash)
+
+			// 重新读取文件
+			newContent, err := os.ReadFile(filePath)
+			if err != nil {
+				writeDebugLog("[DEBUG] checkLocalFileCacheUpdates: read file failed for %s, err=%v\n", filePath, err)
+				continue
+			}
+
+			// 更新缓存
+			localFileCacheMutex.Lock()
+			localFileCache[filePath] = &localFileCacheItem{
+				content:    newContent,
+				modTime:    fileInfo.ModTime(),
+				size:       fileInfo.Size(),
+				createTime: time.Now(),
+				xxhash:     currentXXHash,
+			}
+			localFileCacheMutex.Unlock()
+
+			writeDebugLog("[DEBUG] checkLocalFileCacheUpdates: cache updated, filePath=%s, newContentLen=%d\n",
+				filePath, len(newContent))
+		}
+	}
+}
+
+// writeDebugLog 将调试日志写入 /tmp/cache_press_error 文件
+func writeDebugLog(format string, args ...interface{}) {
+	debugLogMutex.Lock()
+	defer debugLogMutex.Unlock()
+
+	f, err := os.OpenFile("/tmp/cache_press_error", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Printf("writeDebugLog: failed to open log file: %v\n", err)
+		return
+	}
+	defer f.Close()
+
+	msg := fmt.Sprintf(format, args...)
+	f.WriteString(msg)
+}
+
 // getFileETag 获取文件的 ETag，如果文件变化了则重新计算
-// 使用文件的修改时间和大小来判断文件是否变化
+// 使用后台定期检测来更新缓存，避免每次请求都计算 xxhash
 func getFileETag(filePath string) (string, error) {
 	// 获取文件信息
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
 		return "", fmt.Errorf("获取文件信息失败: %w", err)
 	}
-	
+
 	modTime := fileInfo.ModTime()
 	size := fileInfo.Size()
-	
+
 	// 检查缓存
 	fileETagCacheMutex.RLock()
 	cached, exists := fileETagCache[filePath]
 	fileETagCacheMutex.RUnlock()
-	
-	// 如果缓存存在且文件未变化，返回缓存的 ETag
-	if exists && cached.modTime.Equal(modTime) && cached.size == size {
+
+	// 如果缓存存在且未过期，直接返回缓存的 ETag
+	if exists && time.Since(cached.createTime) <= localFileCacheTTL {
+		writeDebugLog("[DEBUG] getFileETag: cache hit, filePath=%s, etag=%s\n", filePath, cached.etag)
 		return cached.etag, nil
 	}
-	
-	// 文件变化或缓存不存在，重新计算 ETag
+
+	// 缓存不存在或已过期，重新计算 ETag
+	writeDebugLog("[DEBUG] getFileETag: cache miss/expired, filePath=%s, modTime=%v, size=%d\n",
+		filePath, modTime, size)
+
 	fileContent, err := os.ReadFile(filePath)
 	if err != nil {
 		return "", fmt.Errorf("读取文件失败: %w", err)
 	}
-	
+
+	// 计算 xxhash 和 MD5 ETag
+	h := xxHash32.New(0)
+	h.Write(fileContent)
+	currentXXHash := h.Sum32()
+
 	hash := md5.Sum(fileContent)
 	etag := hex.EncodeToString(hash[:])
-	
+
+	writeDebugLog("[DEBUG] getFileETag: new etag calculated, filePath=%s, etag=%s, xxhash=%d\n", filePath, etag, currentXXHash)
+
 	// 更新缓存
 	fileETagCacheMutex.Lock()
 	fileETagCache[filePath] = &fileETagCacheItem{
-		etag:    etag,
-		modTime: modTime,
-		size:    size,
+		etag:       etag,
+		modTime:    modTime,
+		size:       size,
+		xxhash:     currentXXHash,
+		createTime: time.Now(),
 	}
 	fileETagCacheMutex.Unlock()
-	
+
 	return etag, nil
 }
 
@@ -523,11 +670,21 @@ func prepareRequestContext(w http.ResponseWriter, r *http.Request) (traceID, met
 	return traceID, method, host, url, startTime
 }
 
-// parseChunkedHeader 解析 X-Use-Chunked-Transfer 请求头，返回是否使用 chunked 传输
+// parseChunkedHeader 解析 X-Use-Chunked-Transfer 和 X-Req-Chunk-Resp 请求头，返回是否使用 chunked 传输
 func parseChunkedHeader(r *http.Request) bool {
 	useChunked := config.useChunkedTransfer
+	// 检查 X-Use-Chunked-Transfer
 	if chunkedHeader := r.Header.Get("X-Use-Chunked-Transfer"); chunkedHeader != "" {
 		switch chunkedHeader {
+		case "true", "1":
+			useChunked = true
+		case "false", "0":
+			useChunked = false
+		}
+	}
+	// 检查 X-Req-Chunk-Resp（优先级更高）
+	if chunkedResp := r.Header.Get("X-Req-Chunk-Resp"); chunkedResp != "" {
+		switch chunkedResp {
 		case "true", "1":
 			useChunked = true
 		case "false", "0":
@@ -548,7 +705,7 @@ func handleFileError(w http.ResponseWriter, r *http.Request, statusCode int, err
 }
 
 // processRequestWithContent 使用指定的内容处理请求
-func processRequestWithContent(w http.ResponseWriter, r *http.Request, content []byte, encoding, language, etag string, useChunked bool, traceID, method, host, url string, startTime time.Time) {
+func processRequestWithContent(w http.ResponseWriter, r *http.Request, content []byte, encoding, language, etag string, useChunked bool, traceID, method, host, url string, startTime time.Time, localFilePath string) {
 	// 处理 X-Mock-302-Location-Map 请求头
 	if locationMap := r.Header.Get("X-Mock-302-Location-Map"); locationMap != "" {
 		handled := handleMock302Redirect(w, r, locationMap, language, traceID, method, host, url, startTime)
@@ -559,7 +716,7 @@ func processRequestWithContent(w http.ResponseWriter, r *http.Request, content [
 
 	// 处理 X-Mock-Resp-Code 请求头
 	if mockRespCode := r.Header.Get("X-Mock-Resp-Code"); mockRespCode != "" {
-		handleMockResponse(w, r, content, encoding, language, etag, traceID, method, host, url, startTime, mockRespCode)
+		handleMockResponse(w, r, content, encoding, language, etag, useChunked, traceID, method, host, url, startTime, mockRespCode)
 		return
 	}
 
@@ -571,16 +728,16 @@ func processRequestWithContent(w http.ResponseWriter, r *http.Request, content [
 	// 处理预压缩
 	if config.preCompress && encoding != "" {
 		if r.Header.Get("Range") != "" {
-			handlePreCompressedRange(w, r, content, encoding, language, etag, traceID, method, host, url, startTime)
+			handlePreCompressedRange(w, r, content, encoding, language, etag, useChunked, traceID, method, host, url, startTime)
 		} else {
-			handlePreCompressedResponse(w, r, content, encoding, language, etag, traceID, method, host, url, startTime)
+			handlePreCompressedResponse(w, r, content, encoding, language, etag, useChunked, traceID, method, host, url, startTime)
 		}
 		return
 	}
 
 	// 处理 Range 请求
 	if r.Header.Get("Range") != "" {
-		handleRangeRequest(w, r, content, language, etag, traceID, method, host, url, startTime)
+		handleRangeRequest(w, r, content, language, etag, useChunked, traceID, method, host, url, startTime, localFilePath)
 		return
 	}
 
@@ -598,17 +755,64 @@ func handleLocalFileRequest(w http.ResponseWriter, r *http.Request, responseBody
 		return false
 	}
 
+	writeDebugLog("[DEBUG] handleLocalFileRequest: localFilePath=%s, traceID=%s, Range=%s\n", localFilePath, traceID, r.Header.Get("Range"))
+
 	// 检查文件是否存在
-	if _, err := os.Stat(localFilePath); os.IsNotExist(err) {
+	fileInfo, statErr := os.Stat(localFilePath)
+	if os.IsNotExist(statErr) {
 		handleFileError(w, r, http.StatusNotFound, fmt.Sprintf("文件不存在: %s", localFilePath), traceID, startTime)
 		return true
 	}
-
-	// 读取文件内容到内存
-	fileContent, err := os.ReadFile(localFilePath)
-	if err != nil {
-		handleFileError(w, r, http.StatusInternalServerError, fmt.Sprintf("读取文件失败: %v", err), traceID, startTime)
+	if statErr != nil {
+		handleFileError(w, r, http.StatusInternalServerError, fmt.Sprintf("检查文件失败: %v", statErr), traceID, startTime)
 		return true
+	}
+
+	writeDebugLog("[DEBUG] handleLocalFileRequest: fileSize=%d, traceID=%s\n", fileInfo.Size(), traceID)
+
+	// 读取文件内容到内存（带缓存）
+	var fileContent []byte
+	var readErr error
+	localFileCacheMutex.RLock()
+	cachedItem, cached := localFileCache[localFilePath]
+	localFileCacheMutex.RUnlock()
+
+	// 检查缓存是否有效：未过期 && 缓存存在
+	cacheExpired := cached && time.Since(cachedItem.createTime) > localFileCacheTTL
+	cacheValid := cached && !cacheExpired
+
+	if cacheValid {
+		// 缓存命中（未过期）
+		fileContent = cachedItem.content
+		writeDebugLog("[DEBUG] handleLocalFileRequest: cache hit, fileContentLen=%d, traceID=%s\n", len(fileContent), traceID)
+	} else {
+		// 缓存未命中或已过期，重新读取
+		if cacheExpired {
+			writeDebugLog("[DEBUG] handleLocalFileRequest: cache expired, traceID=%s\n", traceID)
+		}
+		fileContent, readErr = os.ReadFile(localFilePath)
+		if readErr != nil {
+			handleFileError(w, r, http.StatusInternalServerError, fmt.Sprintf("读取文件失败: %v", readErr), traceID, startTime)
+			return true
+		}
+		writeDebugLog("[DEBUG] handleLocalFileRequest: cache miss/reload, fileContentLen=%d, traceID=%s\n", len(fileContent), traceID)
+
+		// 计算 xxhash
+		currentXXHash, calcErr := calculateFileXXHash(localFilePath)
+		if calcErr != nil {
+			writeDebugLog("[DEBUG] handleLocalFileRequest: calculate xxhash failed, err=%v, traceID=%s\n", calcErr, traceID)
+		}
+
+		// 更新缓存
+		localFileCacheMutex.Lock()
+		localFileCache[localFilePath] = &localFileCacheItem{
+			content:    fileContent,
+			modTime:    fileInfo.ModTime(),
+			size:       fileInfo.Size(),
+			createTime: time.Now(),
+			xxhash:     currentXXHash,
+		}
+		localFileCacheMutex.Unlock()
 	}
 
 	// 协商编码（压缩）
@@ -625,31 +829,34 @@ func handleLocalFileRequest(w http.ResponseWriter, r *http.Request, responseBody
 	// 动态获取 etag（如果文件变化了会重新计算）
 	var fileEtag string
 	if config.etag {
-		fileEtag, err = getFileETag(localFilePath)
-		if err != nil {
-			handleFileError(w, r, http.StatusInternalServerError, fmt.Sprintf("计算 ETag 失败: %v", err), traceID, startTime)
+		var etagErr error
+		fileEtag, etagErr = getFileETag(localFilePath)
+		if etagErr != nil {
+			handleFileError(w, r, http.StatusInternalServerError, fmt.Sprintf("计算 ETag 失败: %v", etagErr), traceID, startTime)
 			return true
 		}
+		writeDebugLog("[DEBUG] handleLocalFileRequest: fileEtag=%s, traceID=%s\n", fileEtag, traceID)
 	}
 
 	// 生成文件的 Last-Modified 时间（使用文件的修改时间）
-	var fileLastModified time.Time
-	if fileInfo, err := os.Stat(localFilePath); err == nil {
-		fileLastModified = fileInfo.ModTime()
-	} else {
-		fileLastModified = getLastModified(fileContent)
-	}
+	fileLastModified := fileInfo.ModTime()
 
 	// 检查条件请求（If-None-Match 和 If-Modified-Since）
 	if config.etag && fileEtag != "" {
+		ifNoneMatch := r.Header.Get("If-None-Match")
+		ifModifiedSince := r.Header.Get("If-Modified-Since")
+		writeDebugLog("[DEBUG] handleLocalFileRequest: conditional request check, traceID=%s, If-None-Match=%s, If-Modified-Since=%s, fileEtag=%s, fileLastModified=%v\n",
+			traceID, ifNoneMatch, ifModifiedSince, fileEtag, fileLastModified)
+
 		if checkConditionalRequest(r, fileEtag, fileLastModified) {
+			writeDebugLog("[DEBUG] handleLocalFileRequest: 304 response, traceID=%s\n", traceID)
 			handle304Response(w, r, fileContent, encoding, language, fileEtag, fileLastModified, traceID, method, host, url, startTime)
 			return true
 		}
 	}
 
 	// 使用提取的函数处理请求
-	processRequestWithContent(w, r, fileContent, encoding, language, fileEtag, useChunked, traceID, method, host, url, startTime)
+	processRequestWithContent(w, r, fileContent, encoding, language, fileEtag, useChunked, traceID, method, host, url, startTime, localFilePath)
 	return true
 }
 
@@ -696,7 +903,7 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 	language := negotiateLanguage(al)
 
 	// 使用提取的函数处理请求
-	processRequestWithContent(wrapper, r, responseBody, encoding, language, etag, useChunked, traceID, method, host, url, startTime)
+	processRequestWithContent(wrapper, r, responseBody, encoding, language, etag, useChunked, traceID, method, host, url, startTime, "")
 }
 
 // generateLocalFileIfNeeded 根据需要生成本地文件
@@ -705,18 +912,18 @@ func generateLocalFileIfNeeded() {
 	if config.localFile == "" {
 		return
 	}
-	
+
 	// 检查文件是否已存在
 	if _, err := os.Stat(config.localFile); err == nil {
 		log.Printf("文件已存在，跳过生成: %s", config.localFile)
 		return
 	}
-	
+
 	size, err := parseFileSize(config.localFile)
 	if err != nil {
 		log.Fatalf("解析文件大小失败: %v", err)
 	}
-	
+
 	if err := generateFile(config.localFile, size); err != nil {
 		log.Fatalf("生成文件失败: %v", err)
 	}
@@ -727,14 +934,14 @@ func generateCertIfNeeded() {
 	if config.generateCert == "" {
 		return
 	}
-	
+
 	if config.certFile == "" {
 		config.certFile = "cert.pem"
 	}
 	if config.keyFile == "" {
 		config.keyFile = "key.pem"
 	}
-	
+
 	if err := generateSelfSignedCert(config.certFile, config.keyFile, config.generateCert); err != nil {
 		log.Fatalf("生成自签证书失败: %v", err)
 	}

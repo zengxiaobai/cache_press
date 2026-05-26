@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +46,46 @@ func writeWithRateLimit(w http.ResponseWriter, data []byte) (total int, err erro
 
 func sendData(w http.ResponseWriter, data []byte) (total int, err error) {
 	total, err = writeWithRateLimit(w, data)
+	return
+}
+
+// sendDataChunked 以 chunked 传输方式分块发送数据，每块发送后 flush
+// 用于 Transfer-Encoding: chunked 响应
+func sendDataChunked(w http.ResponseWriter, data []byte) (total int, err error) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		// 不支持 flush，退化为普通发送
+		return writeWithRateLimit(w, data)
+	}
+
+	dataLen := len(data)
+	offset := 0
+	chunkSize := config.sendBytesPerInterval
+	if chunkSize <= 0 {
+		chunkSize = 32 * 1024 // 默认 32KB 每块
+	}
+
+	for offset < dataLen {
+		end := offset + chunkSize
+		if end > dataLen {
+			end = dataLen
+		}
+
+		var n int
+		n, err = w.Write(data[offset:end])
+		total += n
+		if err != nil {
+			return
+		}
+
+		// flush 触发 chunk 发送
+		flusher.Flush()
+
+		offset = end
+		if offset < dataLen {
+			time.Sleep(time.Duration(config.sendIntervalMs) * time.Millisecond)
+		}
+	}
 	return
 }
 
@@ -131,34 +172,87 @@ func parseRangeHeader(rangeHeader string, contentLength int64) ([]Range, error) 
 	return ranges, nil
 }
 
-func handleSingleRange(w http.ResponseWriter, r Range, responseBody []byte, contentType string, md5Sum string) {
+func handleSingleRange(w http.ResponseWriter, r Range, responseBody []byte, contentType string, md5Sum string, useChunked bool, localFilePath string) {
 	contentLength := int64(len(responseBody))
+
+	writeDebugLog("[DEBUG] handleSingleRange: contentLength=%d, rangeStart=%d, rangeEnd=%d, localFilePath=%s\n",
+		contentLength, r.Start, r.End, localFilePath)
+
+	// 检查 range 是否超出 responseBody 范围
+	if r.Start >= contentLength {
+		writeDebugLog("[DEBUG] handleSingleRange: ERROR rangeStart >= contentLength, rangeStart=%d, contentLength=%d\n",
+			r.Start, contentLength)
+	}
+	if r.End >= contentLength {
+		writeDebugLog("[DEBUG] handleSingleRange: WARNING rangeEnd >= contentLength, rangeEnd=%d, contentLength=%d, adjusting\n",
+			r.End, contentLength)
+	}
+
+	// 计算实际要发送的数据长度
+	actualEnd := r.End
+	if actualEnd >= contentLength {
+		actualEnd = contentLength - 1
+	}
+	actualLen := int(actualEnd - r.Start + 1)
+	writeDebugLog("[DEBUG] handleSingleRange: actual slice range [%d:%d], actualLen=%d, responseBody len=%d\n",
+		r.Start, actualEnd+1, actualLen, len(responseBody))
+
+	if localFilePath != "" {
+		if fileInfo, err := os.Stat(localFilePath); err == nil {
+			expectedSize := fileInfo.Size()
+			if contentLength != expectedSize {
+				writeDebugLog("[DEBUG] handleSingleRange: RANGE_MISMATCH expectedSize=%d, contentLength=%d, bodyLen=%d\n",
+					expectedSize, contentLength, len(responseBody))
+				logRangeMismatch(localFilePath, expectedSize, contentLength, r.Start, r.End, len(responseBody))
+			}
+		}
+	}
 
 	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", r.Start, r.End, contentLength))
 	w.Header().Set("Content-Type", contentType)
 
-	if !config.useChunkedTransfer {
-		w.Header().Set("Content-Length", strconv.Itoa(int(r.End-r.Start+1)))
+	rangeLen := int(r.End - r.Start + 1)
+	if !useChunked {
+		w.Header().Set("Content-Length", strconv.Itoa(rangeLen))
+	} else {
+		w.Header().Set("Transfer-Encoding", "chunked")
 	}
+
+	writeDebugLog("[DEBUG] handleSingleRange: set Content-Length=%d, Content-Range=bytes %d-%d/%d\n",
+		rangeLen, r.Start, r.End, contentLength)
 
 	if md5Sum != "" {
 		w.Header().Set("X-Content-MD5", md5Sum)
 	}
 	w.WriteHeader(http.StatusPartialContent)
 
-	total, err := sendData(w, responseBody[r.Start:r.End+1])
+	// 实际切片
+	dataSlice := responseBody[r.Start : r.End+1]
+	writeDebugLog("[DEBUG] handleSingleRange: dataSlice len=%d, expected len=%d\n", len(dataSlice), rangeLen)
+
+	total, err := sendData(w, dataSlice)
+	writeDebugLog("[DEBUG] handleSingleRange: sent total=%d, err=%v\n", total, err)
 	fmt.Printf("Single range response sent - Start: %d, End: %d, TotalSent: %d, Error: %v\n", r.Start, r.End, total, err)
 }
 
-func handleMultiRange(w http.ResponseWriter, ranges []Range, responseBody []byte, contentType string, md5Sum string) {
+func logRangeMismatch(localFilePath string, expectedSize int64, contentLength int64, rangeStart int64, rangeEnd int64, bodyLen int) {
+	ts := time.Now().Format("2006-01-02T15:04:05.000000")
+	msg := fmt.Sprintf("[%s] RANGE_MISMATCH file=%s expectedSize=%d contentLength=%d bodyLen=%d rangeStart=%d rangeEnd=%d\n",
+		ts, localFilePath, expectedSize, contentLength, bodyLen, rangeStart, rangeEnd)
+	writeDebugLog("%s", msg)
+}
+
+func handleMultiRange(w http.ResponseWriter, ranges []Range, responseBody []byte, contentType string, md5Sum string, useChunked bool, localFilePath string) {
 	contentLength := int64(len(responseBody))
 	boundary := fmt.Sprintf("BOUNDARY_%d", time.Now().UnixNano())
 
 	w.Header().Set("Content-Type", fmt.Sprintf("multipart/byteranges; boundary=%s", boundary))
 
-	if !config.useChunkedTransfer && !config.multiRangeChunked {
+	if !config.useChunkedTransfer && !config.multiRangeChunked && !useChunked {
 		totalLength := calculateMultiRangeLength(ranges, contentLength, contentType, boundary)
 		w.Header().Set("Content-Length", strconv.Itoa(totalLength))
+	} else {
+		w.Header().Set("Transfer-Encoding", "chunked")
 	}
 
 	if md5Sum != "" {

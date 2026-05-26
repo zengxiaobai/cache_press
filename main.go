@@ -55,9 +55,11 @@ type Config struct {
 	delayRespBodyRandom int
 
 	// Range 请求配置 - 仅客户端使用
-	enableRange bool   // 是否启用 Range 请求
-	rangeStr    string // Range 配置字符串，格式: "[0-2048,2049-5000]"
-	rangeRandom bool   // 是否在每个 range 上下限之间随机
+	enableRange          bool    // 是否启用 Range 请求
+	rangeStr             string  // Range 配置字符串，格式: "[0-2048,2049-5000]"
+	rangeRandom          bool    // 是否在每个 range 上下限之间随机
+	randomNoRangeProb    float64 // 随机发送不带 Range 头的概率 (0.0-1.0，0 表示不启用)
+	randomPurgeProb     float64 // 随机发送 PURGE 请求的概率 (0.0-1.0，0 表示不启用)
 
 	ReqIDHdrName string
 	chunkResp    float64
@@ -226,6 +228,8 @@ func init() {
 	// Range 请求配置 - 仅客户端使用
 	flag.StringVar(&config.rangeStr, "range", "", "启用 Range 请求 (仅客户端模式)，格式: -range \"[0-2048,2049-5000]\"")
 	flag.BoolVar(&config.rangeRandom, "range-random", false, "在每个 range 上下限之间随机 (仅客户端模式)")
+	flag.Float64Var(&config.randomNoRangeProb, "random-no-range-prob", 0.0, "随机发送不带 Range 头的概率 (0.0-1.0，0 表示不启用)")
+	flag.Float64Var(&config.randomPurgeProb, "random-purge-prob", 0.0, "随机发送 PURGE 请求的概率 (0.0-1.0，0 表示不启用)")
 	flag.StringVar(&config.ReqIDHdrName, "req-id-hdr-name", "X-WYCDN-Request-ID", "请求ID头名称")
 	flag.StringVar(&config.logDir, "log-dir", "/tmp/cache_press/cache_press.access_log", "访问日志文件路径")
 	flag.StringVar(&config.listenIP, "listen-ip", "", "服务器监听IP (默认: 所有网卡)")
@@ -302,10 +306,15 @@ func init() {
 		fmt.Fprintf(os.Stderr, "\n服务器模式参数:\n")
 		fmt.Fprintf(os.Stderr, "  -local-file   启动时生成指定大小的文件 (大小从文件名推断，如 /tmp/20GB)\n")
 		fmt.Fprintf(os.Stderr, "  -del-req-hdr   强制删除请求头 (格式: [\"hdr1\",\"hdr2\"])\n")
+		fmt.Fprintf(os.Stderr, "\n客户端模式参数:\n")
+		fmt.Fprintf(os.Stderr, "  -random-no-range-prob   随机发送不带 Range 头的概率 (0.0-1.0，0 表示不启用)\n")
+		fmt.Fprintf(os.Stderr, "  -random-purge-prob   随机发送 PURGE 请求的概率 (0.0-1.0，0 表示不启用)\n")
 		fmt.Fprintf(os.Stderr, "\n示例:\n")
 		fmt.Fprintf(os.Stderr, "  启动服务器: %s -mode=server -port=9000\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  启动客户端: %s -mode=client -addr=127.0.0.1:9000 -conns=100 -qps=1000\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  从本地文件响应: curl -H \"X-Req-Local-File: /tmp/test.dat\" http://127.0.0.1:9000/path\n")
+		fmt.Fprintf(os.Stderr, "  启用随机无Range请求: %s -mode=client -addr=127.0.0.1:9000 -range \"[0-1024]\" -random-no-range-prob=0.3\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  启用随机PURGE请求: %s -mode=client -addr=127.0.0.1:9000 -random-purge-prob=0.1\n", os.Args[0])
 	}
 }
 

@@ -16,12 +16,13 @@ import (
 )
 
 type responseResult struct {
-	readBytes     int64
-	cacheHit      bool
-	firstByteTime time.Duration
-	responseTime  time.Duration
-	err           error
-	calculatedMD5 string
+	readBytes          int64
+	cacheHit           bool
+	firstByteTime      time.Duration
+	responseTime       time.Duration
+	err                error
+	calculatedMD5      string
+	bodyFirst20Bytes   []byte // 存储 body 前 20 字节，用于对比失败时调试
 }
 
 func readResponseBody(resp *http.Response, requestStartTime time.Time) responseResult {
@@ -127,6 +128,15 @@ func readResponseBody(resp *http.Response, requestStartTime time.Time) responseR
 
 		result.calculatedMD5 = calculatedMD5
 
+		// 存储 body 前 20 字节，用于对比失败时调试
+		bodyBytes := bodyData.Bytes()
+		n := 20
+		if len(bodyBytes) < n {
+			n = len(bodyBytes)
+		}
+		result.bodyFirst20Bytes = make([]byte, n)
+		copy(result.bodyFirst20Bytes, bodyBytes[:n])
+
 		if !isRangeRequest && serverMD5 != "" {
 			if calculatedMD5 != serverMD5 {
 				traceID := resp.Request.Header.Get(config.ReqIDHdrName)
@@ -135,6 +145,17 @@ func readResponseBody(resp *http.Response, requestStartTime time.Time) responseR
 				}
 				fmt.Printf("MD5校验失败! Trace-ID: %s, 服务器MD5: %s, 客户端计算MD5: %s\n", traceID, serverMD5, calculatedMD5)
 				fmt.Printf("数据长度: 客户端=%d, 服务器=%d\n", len(bodyData.Bytes()), totalExpected)
+
+				// 保存客户端 body 到 /tmp/<traceID>_client.bin
+				safeTraceID := strings.ReplaceAll(traceID, "/", "_")
+				safeTraceID = strings.ReplaceAll(safeTraceID, "..", "_")
+				clientBodyPath := fmt.Sprintf("/tmp/%s_client.bin", safeTraceID)
+				if err := os.WriteFile(clientBodyPath, bodyData.Bytes(), 0644); err != nil {
+					fmt.Printf("警告: 写入客户端 body 文件失败: %v\n", err)
+				} else {
+					fmt.Printf("客户端 body 已保存至: %s (共 %d 字节)\n", clientBodyPath, len(bodyData.Bytes()))
+				}
+
 				if !config.ignoreErr {
 					os.Exit(1)
 				}

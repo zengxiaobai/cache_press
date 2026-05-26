@@ -125,6 +125,12 @@ func runClient() {
 
 				recordRequestResult(resp, req, result, requestStartTime)
 
+				// 如果配置了随机 PURGE 概率，则随机发送 PURGE 请求
+				if config.randomPurgeProb > 0 && rand.Float64() < config.randomPurgeProb {
+					purgeURL := fmt.Sprintf("%s://%s%s", req.URL.Scheme, config.addr, req.URL.RequestURI())
+					sendPurgeRequest(client, purgeURL)
+				}
+
 				<-semaphore
 			}
 		}(i)
@@ -167,22 +173,39 @@ func compareHash(req *http.Request, resp *http.Response, result responseResult, 
 	}
 	defer compareResp.Body.Close()
 
-	_ = readResponseBody(compareResp, requestStartTime)
+	compareResult := readResponseBody(compareResp, requestStartTime)
 
 	clientMD5 := result.calculatedMD5
 	compareMD5 := compareResp.Header.Get("X-Content-MD5")
 
 	if clientMD5 != "" && compareMD5 != "" {
-		traceID := resp.Header.Get(config.ReqIDHdrName)
+		// 从请求头读取 Trace-ID，如果为空则从响应头读取，再为空则设为 unknown
+		traceID := req.Header.Get(config.ReqIDHdrName)
+		if traceID == "" {
+			traceID = resp.Header.Get(config.ReqIDHdrName)
+		}
 		if traceID == "" {
 			traceID = "unknown"
 		}
-		dataLen := result.readBytes
+		clientDataLen := result.readBytes
+		compareDataLen := compareResult.readBytes
 
 		if clientMD5 == compareMD5 {
-			fmt.Printf("Hash 对比成功 - URI: %s, Trace-ID: %s, Client MD5: %s, Compare Server MD5: %s, 数据长度: %d\n", req.URL.RequestURI(), traceID, clientMD5, compareMD5, dataLen)
+			fmt.Printf("Hash 对比成功 - URI: %s, Trace-ID: %s %s %s, Client MD5: %s, Compare Server MD5: %s, Client 数据长度: %d, Compare Server 数据长度: %d\n",
+				req.URL.RequestURI(), traceID, req.Header.Get(config.ReqIDHdrName), resp.Header.Get(config.ReqIDHdrName), clientMD5, compareMD5, clientDataLen, compareDataLen)
 		} else {
-			fmt.Printf("Hash 对比失败 - URI: %s, Trace-ID: %s, Client MD5: %s, Compare Server MD5: %s, 数据长度: %d\n", req.URL.RequestURI(), traceID, clientMD5, compareMD5, dataLen)
+			fmt.Printf("Hash 对比失败 - URI: %s, Trace-ID: %s %s %s, Client MD5: %s, Compare Server MD5: %s, Client 数据长度: %d, Compare Server 数据长度: %d\n",
+				req.URL.RequestURI(), traceID, req.Header.Get(config.ReqIDHdrName), resp.Header.Get(config.ReqIDHdrName), clientMD5, compareMD5, clientDataLen, compareDataLen)
+			// 打印 Client 读取内容的前 20 字节
+			if len(result.bodyFirst20Bytes) > 0 {
+				fmt.Printf("Hash 对比失败 - Client 前 20 字节(hex): %x\n", result.bodyFirst20Bytes)
+				fmt.Printf("Hash 对比失败 - Client 前 20 字节(string): %s\n", string(result.bodyFirst20Bytes))
+			}
+			// 打印 Compare Server 读取内容的前 20 字节
+			if len(compareResult.bodyFirst20Bytes) > 0 {
+				fmt.Printf("Hash 对比失败 - Compare Server 前 20 字节(hex): %x\n", compareResult.bodyFirst20Bytes)
+				fmt.Printf("Hash 对比失败 - Compare Server 前 20 字节(string): %s\n", string(compareResult.bodyFirst20Bytes))
+			}
 			os.Exit(1)
 		}
 	}

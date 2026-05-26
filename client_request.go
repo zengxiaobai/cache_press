@@ -104,9 +104,15 @@ func createRequest(connID int, baseURL string) (*http.Request, error) {
 		req.Header.Set("Connection", "keep-alive")
 	}
 
+	// Range 请求：如果配置了随机无 Range 概率，则随机决定是否带 Range 头
 	if config.enableRange {
 		ranges := parseRangeSpec(config.rangeStr)
-		if len(ranges) > 0 {
+		shouldAddRange := true
+		if config.randomNoRangeProb > 0 {
+			// 根据配置的概率决定是否带 Range 头
+			shouldAddRange = rand.Float64() >= config.randomNoRangeProb
+		}
+		if len(ranges) > 0 && shouldAddRange {
 			var rangeParts []string
 			for _, spec := range ranges {
 				var start, end int64
@@ -132,4 +138,25 @@ func createRequest(connID int, baseURL string) (*http.Request, error) {
 	}
 
 	return req, nil
+}
+
+// sendPurgeRequest 发送 PURGE 请求
+func sendPurgeRequest(client *http.Client, purgeURL string) {
+	purgeReq, err := http.NewRequest("PURGE", purgeURL, nil)
+	if err != nil {
+		fmt.Printf("创建 PURGE 请求失败: %v\n", err)
+		return
+	}
+	purgeReq.Header.Set("purge-type", "file,hard")
+	purgeReq.Header.Set("User-Agent", "PressureTestClient-Purge")
+	purgeReq.URL.Host = config.addr
+	purgeReq.Host = config.host
+
+	resp, err := client.Do(purgeReq)
+	if err != nil {
+		fmt.Printf("PURGE 请求失败 %s: %v\n", purgeURL, err)
+		return
+	}
+	defer resp.Body.Close()
+	fmt.Printf("PURGE %s: %s\n", purgeURL, resp.Status)
 }
