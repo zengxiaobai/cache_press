@@ -55,11 +55,11 @@ type Config struct {
 	delayRespBodyRandom int
 
 	// Range 请求配置 - 仅客户端使用
-	enableRange          bool    // 是否启用 Range 请求
-	rangeStr             string  // Range 配置字符串，格式: "[0-2048,2049-5000]"
-	rangeRandom          bool    // 是否在每个 range 上下限之间随机
-	randomNoRangeProb    float64 // 随机发送不带 Range 头的概率 (0.0-1.0，0 表示不启用)
-	randomPurgeProb     float64 // 随机发送 PURGE 请求的概率 (0.0-1.0，0 表示不启用)
+	enableRange       bool    // 是否启用 Range 请求
+	rangeStr          string  // Range 配置字符串，格式: "[0-2048,2049-5000]"
+	rangeRandom       bool    // 是否在每个 range 上下限之间随机
+	randomNoRangeProb float64 // 随机发送不带 Range 头的概率 (0.0-1.0，0 表示不启用)
+	randomPurgeProb   float64 // 随机发送 PURGE 请求的概率 (0.0-1.0，0 表示不启用)
 
 	ReqIDHdrName string
 	chunkResp    float64
@@ -636,6 +636,22 @@ func hashIndex(index int) int {
 
 func main() {
 	flag.Parse()
+
+	// 根据模式设置不同的 access log 文件名（仅在用户未显式指定 -log-dir 时生效）
+	logDirExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "log-dir" {
+			logDirExplicit = true
+		}
+	})
+	if !logDirExplicit && config.logDir != "" {
+		switch config.mode {
+		case "server":
+			config.logDir = "/tmp/cache_press/server.access_log"
+		case "client":
+			config.logDir = "/tmp/cache_press/client.access_log"
+		}
+	}
 
 	// 启动 pprof 服务器
 	if config.pprofPort > 0 {

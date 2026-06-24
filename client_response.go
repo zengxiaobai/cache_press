@@ -16,13 +16,13 @@ import (
 )
 
 type responseResult struct {
-	readBytes          int64
-	cacheHit           bool
-	firstByteTime      time.Duration
-	responseTime       time.Duration
-	err                error
-	calculatedMD5      string
-	bodyFirst20Bytes   []byte // 存储 body 前 20 字节，用于对比失败时调试
+	readBytes        int64
+	cacheHit         bool
+	firstByteTime    time.Duration
+	responseTime     time.Duration
+	err              error
+	calculatedMD5    string
+	bodyFirst20Bytes []byte // 存储 body 前 20 字节，用于对比失败时调试
 }
 
 func readResponseBody(resp *http.Response, requestStartTime time.Time) responseResult {
@@ -52,7 +52,7 @@ func readResponseBody(resp *http.Response, requestStartTime time.Time) responseR
 
 	serverMD5 := resp.Header.Get("X-Content-MD5")
 	isRangeRequest := resp.Request != nil && resp.Request.Header.Get("Range") != ""
-	shouldCalculateHash := serverMD5 != "" || (isRangeRequest && config.compareAddr != "")
+	shouldCalculateHash := serverMD5 != "" || config.compareAddr != ""
 
 	isMultiRange := strings.Contains(resp.Header.Get("Content-Type"), "multipart/byteranges")
 	var boundary string
@@ -73,7 +73,6 @@ func readResponseBody(resp *http.Response, requestStartTime time.Time) responseR
 		}
 		buffer.PutBytes(chunkPtr)
 	}()
-
 
 	reader := resp.Body
 	for {
@@ -137,7 +136,7 @@ func readResponseBody(resp *http.Response, requestStartTime time.Time) responseR
 		result.bodyFirst20Bytes = make([]byte, n)
 		copy(result.bodyFirst20Bytes, bodyBytes[:n])
 
-		if !isRangeRequest && serverMD5 != "" {
+		if !isRangeRequest && serverMD5 != "" && config.compareAddr == "" {
 			if calculatedMD5 != serverMD5 {
 				traceID := resp.Request.Header.Get(config.ReqIDHdrName)
 				if traceID == "" {

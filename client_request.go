@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	neturl "net/url"
@@ -141,6 +142,8 @@ func createRequest(connID int, baseURL string) (*http.Request, error) {
 }
 
 // sendPurgeRequest 发送 PURGE 请求
+// PURGE 请求不校验 MD5：仅发送 purge-type 头并打印响应状态，
+// 不读取/计算响应体 MD5，仅 drain body 以便连接复用。
 func sendPurgeRequest(client *http.Client, purgeURL string) {
 	purgeReq, err := http.NewRequest("PURGE", purgeURL, nil)
 	if err != nil {
@@ -157,6 +160,8 @@ func sendPurgeRequest(client *http.Client, purgeURL string) {
 		fmt.Printf("PURGE 请求失败 %s: %v\n", purgeURL, err)
 		return
 	}
-	defer resp.Body.Close()
+	// drain body 以便连接复用，但不做任何 MD5 校验
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 	fmt.Printf("PURGE %s: %s\n", purgeURL, resp.Status)
 }

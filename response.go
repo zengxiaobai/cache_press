@@ -131,6 +131,80 @@ func logAccess(requestID string, r *http.Request, w http.ResponseWriter, startTi
 	}
 }
 
+// logClientAccess 记录客户端侧的访问日志（请求 + 响应）
+// 与服务端的 logAccess 不同，客户端使用 resp.Header 而非 ResponseWriter.Header()
+func logClientAccess(req *http.Request, resp *http.Response, startTime time.Time, total int, statusCode int, err error) {
+	if config.logDir == "" {
+		return
+	}
+
+	traceID := ""
+	if req != nil {
+		traceID = req.Header.Get(config.ReqIDHdrName)
+	}
+
+	entry := AccessLogEntry{
+		RequestID:        traceID,
+		URL:              "",
+		ClientAddr:       "",
+		RequestHeaders:   make(map[string]string),
+		ResponseHeaders:  make(map[string]string),
+		RequestStartTime: startTime.UnixMilli(),
+		RequestLogTime:   time.Now().UnixMilli(),
+		TotalSent:        total,
+		StatusCode:       statusCode,
+		Error:            "",
+	}
+
+	if err != nil {
+		entry.Error = err.Error()
+	}
+
+	if req != nil {
+		entry.URL = req.URL.String()
+		for name, values := range req.Header {
+			entry.RequestHeaders[name] = strings.Join(values, ", ")
+		}
+		if req.Host != "" {
+			entry.RequestHeaders["Host"] = req.Host
+		}
+	}
+
+	if resp != nil {
+		hdr := resp.Header
+		if v := hdr.Get("Content-Range"); v != "" {
+			entry.ResponseHeaders["Content-Range"] = v
+		}
+		if v := hdr.Get("Transfer-Encoding"); v != "" {
+			entry.ResponseHeaders["Transfer-Encoding"] = v
+		}
+		if v := hdr.Get("Content-Length"); v != "" {
+			entry.ResponseHeaders["Content-Length"] = v
+		}
+		if v := hdr.Get("Content-Encoding"); v != "" {
+			entry.ResponseHeaders["Content-Encoding"] = v
+		}
+		if v := hdr.Get("X-Content-MD5"); v != "" {
+			entry.ResponseHeaders["X-Content-MD5"] = v
+		}
+	}
+
+	logBytes, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+
+	accessLogMutex.Lock()
+	defer accessLogMutex.Unlock()
+	if accessLogWriter != nil {
+		accessLogWriter.Write(logBytes)
+		accessLogWriter.Write([]byte("\n"))
+		if syncWriter, ok := accessLogWriter.(interface{ Sync() error }); ok {
+			syncWriter.Sync()
+		}
+	}
+}
+
 // parseXRespAddHeader 解析 X-Resp-Add-Header 请求头
 // 格式: "Header: Value"，支持多个用逗号分隔
 func parseXRespAddHeader(headerValue string) ([]string, error) {

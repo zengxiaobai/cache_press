@@ -41,12 +41,19 @@ func printFinalStats(baseURL string, startTime time.Time) {
 }
 
 func recordRequestResult(resp *http.Response, req *http.Request, result responseResult, requestStartTime time.Time) {
+	statusCode := 0
+	if resp != nil {
+		statusCode = resp.StatusCode
+	}
+
 	if result.err != nil {
 		fmt.Println("read body err :", result.err, req.URL.Path, req.Header.Get("Range"), result.readBytes, requestStartTime.Format("2006-01-02 15:04:05.000"), time.Now().Format("2006-01-02 15:04:05.000"), req.Header.Get(config.ReqIDHdrName))
 		if resp != nil {
 			fmt.Println("respHeader:", resp.Header)
 		}
 		fmt.Println("reqHeader:", req.Header)
+
+		logClientAccess(req, resp, requestStartTime, int(result.readBytes), statusCode, result.err)
 
 		if !config.ignoreErr {
 			os.Exit(1)
@@ -55,6 +62,8 @@ func recordRequestResult(resp *http.Response, req *http.Request, result response
 	} else {
 		atomic.AddInt64(&successRequests, 1)
 		atomic.AddInt64(&totalBytes, result.readBytes)
+
+		logClientAccess(req, resp, requestStartTime, int(result.readBytes), statusCode, nil)
 	}
 
 	select {
