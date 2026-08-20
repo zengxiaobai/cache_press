@@ -133,6 +133,10 @@ type Config struct {
 	clientRecvFullCloseProb float64  // 接收完响应后主动断开连接的概率 (0.0-1.0)
 	addHeaderFile           string   // 请求头配置文件路径 (仅客户端使用)
 	customHeaders           []string // 解析后的自定义请求头列表
+
+	// 配置驱动的重定向 - 仅服务器使用
+	locationURL  string // 重定向 Location 头 (为空表示不启用)
+	locationCode int    // 重定向状态码 (默认 302)
 }
 
 type reqStatInfo struct {
@@ -288,6 +292,8 @@ func init() {
 		config.cmdRespHeaders = append(config.cmdRespHeaders, value)
 		return nil
 	})
+	flag.StringVar(&config.locationURL, "location-url", "", "重定向 Location 头 (仅服务器模式，设置后所有请求返回重定向响应，需配合 --location-code)")
+	flag.IntVar(&config.locationCode, "location-code", http.StatusFound, "重定向状态码 (仅服务器模式，默认 302，常用: 301/302/303/307/308)")
 
 	// 自定义帮助信息，添加请求头控制功能说明
 	flag.Usage = func() {
@@ -728,6 +734,14 @@ func main() {
 		config.sendBytesPerInterval = sendBytes
 		config.sendIntervalMs = sendInterval
 		fmt.Printf("响应速率限制已设置: %s (每次发送 %d 字节，间隔 %d 毫秒)\n", config.respRate, sendBytes, sendInterval)
+	}
+
+	// 校验配置驱动的重定向
+	if config.locationURL != "" {
+		if config.locationCode < 300 || config.locationCode > 399 {
+			log.Fatalf("无效的 --location-code: %d，重定向状态码必须在 3xx 范围内", config.locationCode)
+		}
+		fmt.Printf("配置驱动重定向已启用: Location=%s, Code=%d\n", config.locationURL, config.locationCode)
 	}
 
 	switch config.mode {

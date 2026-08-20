@@ -860,6 +860,32 @@ func handleLocalFileRequest(w http.ResponseWriter, r *http.Request, responseBody
 	return true
 }
 
+// handleConfigRedirect 处理由 --location-url / --location-code 配置驱动的重定向响应
+// 当 --location-url 非空时，所有请求都会返回指定的状态码和 Location 头
+func handleConfigRedirect(w *responseWriterWrapper, r *http.Request, traceID, method, host, url string, startTime time.Time) {
+	// 构建完整的请求 URL（用于调试）
+	requestURL := buildRequestURL(r, host, url)
+
+	// 添加响应头文件中的内容
+	addResponseHeaders(w)
+
+	// 添加请求头到响应头中
+	addRequestHeadersToResponse(w, r)
+
+	// 添加 X-Resp-Add-Header 请求头中的响应头（优先级更高，可覆盖）
+	addXRespAddHeaders(w, r)
+
+	w.Header().Set("X-Debug-Req-Url", requestURL)
+	w.Header().Set("Location", config.locationURL)
+	w.WriteHeader(config.locationCode)
+
+	logAccess(traceID, r, w, startTime, 0, config.locationCode, nil)
+
+	fmt.Printf("配置重定向 - Trace-ID: %s, RequestURL: %s, Location: %s, Code: %d, Method: %s, Host: %s, Start: %s, Client: %s\n",
+		traceID, requestURL, config.locationURL, config.locationCode, method, host,
+		startTime.Format("2006-01-02 15:04:05.000"), r.RemoteAddr)
+}
+
 func serverHandler(w http.ResponseWriter, r *http.Request) {
 	// 准备请求上下文
 	traceID, method, host, url, startTime := prepareRequestContext(w, r)
@@ -868,6 +894,12 @@ func serverHandler(w http.ResponseWriter, r *http.Request) {
 	wrapper := &responseWriterWrapper{
 		ResponseWriter: w,
 		statusCode:     http.StatusOK, // 默认状态码
+	}
+
+	// 配置驱动的重定向 (--location-url / --location-code)，优先级最高
+	if config.locationURL != "" {
+		handleConfigRedirect(wrapper, r, traceID, method, host, url, startTime)
+		return
 	}
 
 	// 先生成响应体（用于 ETag 生成和条件请求检查）
